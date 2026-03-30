@@ -1,4 +1,5 @@
 extra-streamlit-components
+groq
 openpyxl
 pandas
 Pillow
