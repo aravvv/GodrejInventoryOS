@@ -37,16 +37,20 @@ cookie_manager = get_manager()
 if "authenticated" not in st.session_state:
     st.session_state["authenticated"] = False
     
-    # Try Cookie Recovery
-    c_user = cookie_manager.get("inv_user")
-    if c_user:
-        with open("users.json", "r") as f:
-            v_users = json.load(f)
-        if c_user in v_users:
-            st.session_state["authenticated"] = True
-            st.session_state["user"] = c_user
-            st.session_state["name"] = v_users[c_user]["name"]
-            st.session_state["page"] = "Inventory" if c_user == "admin" else "Update Stock"
+    # Try Cookie Recovery (only if user didn't explicitly log out)
+    if not st.session_state.get("logged_out", False):
+        c_user = cookie_manager.get("inv_user")
+        if c_user:
+            try:
+                with open("users.json", "r") as f:
+                    v_users = json.load(f)
+                if c_user in v_users:
+                    st.session_state["authenticated"] = True
+                    st.session_state["user"] = c_user
+                    st.session_state["name"] = v_users[c_user]["name"]
+                    st.session_state["page"] = "Inventory" if c_user == "admin" else "Update Stock"
+            except Exception:
+                pass
 
 if not st.session_state["authenticated"]:
     st.title("🔒 Staff Login")
@@ -161,8 +165,15 @@ if st.session_state.get("user") == "admin":
         st.rerun()
 
 if st.sidebar.button("Logout", use_container_width=True):
-    cookie_manager.delete("inv_user") # Clear Persistent Login
+    # Safely delete cookie (avoid KeyError if cookie doesn't exist)
+    try:
+        all_cookies = cookie_manager.get_all()
+        if "inv_user" in (all_cookies or {}):
+            cookie_manager.delete("inv_user")
+    except Exception:
+        pass
     st.session_state["authenticated"] = False
+    st.session_state["logged_out"] = True  # Prevent cookie re-login
     st.rerun()
 
 if st.session_state.get("user") == "admin":
