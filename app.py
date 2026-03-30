@@ -1,35 +1,243 @@
 import streamlit as st
-import os
-import requests
-import json
+import os, requests, json, io, cv2, re
 import pandas as pd
-from groq import Groq
-from dotenv import load_dotenv
-from PIL import Image
-import io
-import cv2
 import numpy as np
-import re
+from PIL import Image
+from dotenv import load_dotenv
+from groq import Groq
+from datetime import datetime, timedelta
+import extra_streamlit_components as stx
 
-# --- ADVANCED HYBRID PARSING (REGEX FALLBACK) ---
+# --- CONFIGURATION & AUTH ---
+st.set_page_config(page_title="Inventory OS", page_icon="📦", layout="centered")
+
+# Native Cloud Secrets: Safe for Deployment
+GROQ_API_KEY = st.secrets.get("GROQ_API_KEY") or os.getenv("GROQ_API_KEY")
+OCR_SPACE_API_KEY = st.secrets.get("OCR_SPACE_API_KEY") or os.getenv("OCR_SPACE_API_KEY", "helloworld")
+EXCEL_FILE = "inventory.xlsx"
+TXN_FILE = "transactions.csv"
+THRESHOLD_FILE = "thresholds.json"
+
+def load_thresholds():
+    if os.path.exists(THRESHOLD_FILE):
+        with open(THRESHOLD_FILE, "r") as f:
+            return json.load(f)
+    return {}
+
+def save_thresholds(t_dict):
+    with open(THRESHOLD_FILE, "w") as f:
+        json.dump(t_dict, f, indent=2)
+
+# 1. Persistent Login System (24-hour Cookies)
+def get_manager():
+    return stx.CookieManager()
+
+cookie_manager = get_manager()
+
+if "authenticated" not in st.session_state:
+    st.session_state["authenticated"] = False
+    
+    # Try Cookie Recovery
+    c_user = cookie_manager.get("inv_user")
+    if c_user:
+        with open("users.json", "r") as f:
+            v_users = json.load(f)
+        if c_user in v_users:
+            st.session_state["authenticated"] = True
+            st.session_state["user"] = c_user
+            st.session_state["name"] = v_users[c_user]["name"]
+            st.session_state["page"] = "Inventory" if c_user == "admin" else "Update Stock"
+
+if not st.session_state["authenticated"]:
+    st.title("🔒 Staff Login")
+    with st.form("Login"):
+        username = st.text_input("Username").strip()
+        password = st.text_input("Password", type="password")
+        if st.form_submit_button("Login"):
+            with open("users.json", "r") as f:
+                v_users = json.load(f)
+            if username in v_users and v_users[username]["password"] == password:
+                # Set 24-hour cookie
+                cookie_manager.set("inv_user", username, expires_at=datetime.now() + timedelta(days=1))
+                st.session_state["authenticated"] = True
+                st.session_state["user"] = username
+                st.session_state["name"] = v_users[username]["name"]
+                st.session_state["page"] = "Inventory" if username == "admin" else "Update Stock"
+                st.session_state["transaction_type"] = None
+                st.rerun()
+            else:
+                st.error("Invalid Credentials!")
+    st.stop()
+
+# --- CACHED RESOURCES ---
+PRICE_CACHE = "_price_list_cache.pkl"
+
+@st.cache_data
+def load_price_list():
+    """Smart loader that handles varied column names (LN Code vs Product Code)."""
+    try:
+        # 1. Excel File Check
+        xls_path = "priceListHomeFurniture.xlsx"
+        if not os.path.exists(xls_path): return None
+        
+        # 2. Cache Check
+        if os.path.exists(PRICE_CACHE):
+            if os.path.getmtime(PRICE_CACHE) > os.path.getmtime(xls_path):
+                return pd.read_pickle(PRICE_CACHE)
+        
+        # 3. Flexible Column Synonyms
+        CODE_ALIAES = ["LN Code", "Product Code", "Item Code", "Code"]
+        DESC_ALIAES = ["LN Description", "Product Name", "Description", "Item Name"]
+        
+        xls = pd.ExcelFile(xls_path)
+        all_dfs = []
+        for sheet_name in xls.sheet_names:
+            df = pd.read_excel(xls, sheet_name=sheet_name, header=5)
+            
+            # Find Best Columns
+            col_code = next((c for c in CODE_ALIAES if c in df.columns), None)
+            col_desc = next((c for c in DESC_ALIAES if c in df.columns), None)
+            
+            if col_code and col_desc:
+                subset = df[[col_code, col_desc]].copy()
+                # Use standardized internal names
+                subset.columns = ["LN Code", "LN Description"]
+                subset["Unit Consumer Basic"] = df.get("Unit Consumer Basic", pd.Series(dtype="object"))
+                subset["Category"] = sheet_name
+                all_dfs.append(subset)
+        
+        if all_dfs:
+            combined = pd.concat(all_dfs, ignore_index=True)
+            combined = combined.dropna(subset=["LN Code"])
+            combined["LN Code"] = combined["LN Code"].astype(str).str.strip()
+            combined.to_pickle(PRICE_CACHE)
+            return combined
+        return None
+    except Exception as e:
+        st.session_state["last_ocr_err"] = f"Price List Loading Error: {e}"
+        return None
+        st.sidebar.error(f"Price List Missing or Error: {e}")
+        return None
+
+price_list_df = load_price_list()
+
+# --- SIDEBAR UI ---
+st.sidebar.title(f"👤 Welcome, {st.session_state.get('name', 'Staff')}")
+st.sidebar.divider()
+
+# Navigation
+if st.sidebar.button("📦 View Inventory", use_container_width=True):
+    st.session_state["page"] = "Inventory"
+    st.rerun()
+
+if st.sidebar.button("🔄 Update Stock", use_container_width=True):
+    st.session_state["page"] = "Update Stock"
+    st.session_state["transaction_type"] = None
+    st.rerun()
+
+if st.sidebar.button("📜 View History", use_container_width=True):
+    st.session_state["page"] = "History"
+    st.rerun()
+
+if st.session_state.get("user") == "admin":
+    if st.sidebar.button("🛠️ Manage Staff", use_container_width=True):
+        st.session_state["page"] = "Manage Staff"
+        st.rerun()
+    if st.sidebar.button("📉 Stock Maintenance", use_container_width=True):
+        st.session_state["page"] = "Stock Maintenance"
+        st.rerun()
+    if st.sidebar.button("🛠️ Manage Master List", use_container_width=True):
+        st.session_state["page"] = "Manage Master List"
+        st.rerun()
+
+st.sidebar.divider()
+if st.session_state.get("user") == "admin":
+    if st.sidebar.button("🗑️ Clear Inventory", type="secondary"):
+        for f in [EXCEL_FILE, TXN_FILE, PRICE_CACHE]:
+            if os.path.exists(f):
+                os.remove(f)
+        st.cache_data.clear()
+        st.sidebar.success("Inventory & transactions cleared!")
+        st.rerun()
+
+if st.sidebar.button("Logout", use_container_width=True):
+    cookie_manager.delete("inv_user") # Clear Persistent Login
+    st.session_state["authenticated"] = False
+    st.rerun()
+
+if st.session_state.get("user") == "admin":
+    with st.sidebar.expander("🛡️ Data Controls"):
+        if st.button("🧹 Cleanup Rogue Data", help="Scans for 1,000,000+ unit errors", use_container_width=True):
+            if os.path.exists(TXN_FILE):
+                try:
+                    cdf = pd.read_csv(TXN_FILE)
+                    # Check for huge Qty Diff
+                    bad_mask = cdf["Qty Diff"].abs() > 5000 
+                    bad_count = bad_mask.sum()
+                    if bad_count > 0:
+                        cdf = cdf[~bad_mask]
+                        cdf.to_csv(TXN_FILE, index=False)
+                        st.sidebar.success(f"Fixed {bad_count} massive entries!")
+                        st.rerun()
+                    else:
+                        st.sidebar.info("All good! No massive entries found.")
+                except Exception as e:
+                    st.sidebar.error(f"Error: {e}")
+            else:
+                st.sidebar.info("No transaction file found.")
+
+if st.session_state.get("user") == "admin":
+    with st.sidebar.expander("🛠️ OCR Diagnostic"):
+        st.write("**Extracted Text:**")
+        st.code(st.session_state.get("raw_ocr_code", "No extraction yet"))
+        st.write("**Status:**")
+        st.code(st.session_state.get("last_ocr_err", "No errors recorded"))
+        if st.button("Reset Log"):
+            st.session_state["raw_ocr_code"] = "None"
+            st.session_state["last_ocr_err"] = "No errors recorded"
+            st.rerun()
+
+# --- CORE FUNCTIONS ---
+def sanitize_quantity(val):
+    """Safety guard: no single auto-extraction should exceed 500 units."""
+    try:
+        qty = int(val)
+        if qty > 500: return 1 # Reset to 1 if it smells like a phone number
+        return max(1, qty)
+    except Exception:
+        return 1
+
 def hard_extract_math(text):
+    """Primary regex for the 15-character 8+SD+5 format."""
     pc, qty = None, None
-    pc_match = re.search(r"PRODUCT\s*CODE[\s:]*([A-Z0-9]{8,})", text, re.IGNORECASE)
-    if pc_match: pc = pc_match.group(1)
-    qty_match = re.search(r"(?:NET\s*QUANTITY|UNITS?|QTY)[\s:]*(\d+)", text, re.IGNORECASE)
-    if qty_match: qty = int(qty_match.group(1))
+    # 1. Product Code: 8 digits, SD, 5 digits
+    pc_match = re.search(r"(\d{7,9})[A-Z0-9]{1,2}(\d{4,6})", text, re.IGNORECASE)
+    if pc_match:
+        raw_pre, raw_suf = pc_match.group(1), pc_match.group(2)
+        pc = f"{raw_pre[-8:]}SD{raw_suf[:5]}"
+        
+    # 2. QTY: Using \b (boundaries) to avoid matching phone numbers
+    qty_match = re.search(r"(?:NET\s*QUANTITY|UNITS?|QTY)[\s:]*\b(\d+)\b", text, re.IGNORECASE)
+    if qty_match: qty = sanitize_quantity(qty_match.group(1))
     return pc, qty
+
+def repair_ocr_code(text):
+    """Fuzzy repair for the 15-digit pattern if hard_extract_math missed it."""
+    # Look for any sequence of 13-17 chars that smells like a code
+    potential = re.findall(r"[A-Z0-9]{13,17}", text.upper())
+    for p in potential:
+        # If it has an 'S' or 'D' in the middle, try to force it to 8+SD+5
+        m = re.search(r"(\d{7,9})[SD]{1,2}(\d{4,6})", p)
+        if m:
+            return f"{m.group(1)[-8:]}SD{m.group(2)[:5]}"
+    return None
 
 def sharpen_image(pil_img):
     img = np.array(pil_img)
-    # Intense 3x3 sharpening kernel to force edge contrast mathematically
-    kernel = np.array([[0, -1, 0], 
-                       [-1, 5, -1], 
-                       [0, -1, 0]])
-    sharpened = cv2.filter2D(img, -1, kernel)
-    return Image.fromarray(sharpened)
+    # Balanced sharpen: improves 8/3/1/4 accuracy without creating blooming
+    kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
+    return Image.fromarray(cv2.filter2D(img, -1, kernel))
 
-# --- COMPUTER VISION DOCUMENT SCANNER ---
 def scan_document(pil_image):
     image = np.array(pil_image)
     if len(image.shape) == 3 and image.shape[2] == 4:
@@ -38,378 +246,647 @@ def scan_document(pil_image):
     orig = image.copy()
     gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
     
-    # 1. Text-Density Geometry (Colorblind Text Tracking)
-    # Extract edges to isolate typography regardless of label color or physical tape
     grad = cv2.morphologyEx(gray, cv2.MORPH_GRADIENT, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)))
     _, thresh = cv2.threshold(grad, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
     
-    # 2. Forge the text map. 
-    # Massive horizontal and vertical kernels literally bleed all adjacent letters and rows together into a huge solid plateau.
-    # We use a 50x15 horizontal kernel to fuse columns, and a 15x50 vertical to fuse lines!
     closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (50, 15)))
     closed = cv2.morphologyEx(closed, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (15, 50)))
     
     cnts, _ = cv2.findContours(closed.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not cnts: return pil_image
     
-    # 3. Target the single largest plateau of text (The Godrej Label)
+    # Text-Density Geometry: Find the densest text-block area
     largest = max(cnts, key=cv2.contourArea)
-    if cv2.contourArea(largest) < (image.shape[0] * image.shape[1] * 0.02):
-        return pil_image # Failsafe: if plateaus are absurdly tiny, it's not a label.
+    if cv2.contourArea(largest) < (image.shape[0] * image.shape[1] * 0.015): # 1.5% minimum area
+        return pil_image
         
-    # 4. Strictly flat 2D bounding box (Bypassing 3D Perspective Squashing bugs)
     x, y, w, h = cv2.boundingRect(largest)
-    
-    # 5. Lock coordinates exactly to the text bounding box (0% padding)
-    pad_y = 0
-    pad_x = 0
+    pad_y = int(h * 0.12)
+    pad_x = int(w * 0.12)
     
     y1 = max(0, y - pad_y)
     y2 = min(image.shape[0], y + h + pad_y)
     x1 = max(0, x - pad_x)
     x2 = min(image.shape[1], x + w + pad_x)
     
-    cropped = orig[y1:y2, x1:x2]
-    return Image.fromarray(cropped)
+    return Image.fromarray(orig[y1:y2, x1:x2])
 
-# --- CONFIGURATION ---
-st.set_page_config(page_title="AI Inventory Extractor", page_icon="📦")
-st.title("📦 AI Inventory Extractor")
-st.info("Upload an image to extract product details and save them to Excel.")
+def compress_image(pil_img, max_size=1280):
+    """Resize image to a manageable size for mobile/OCR performance."""
+    if max(pil_img.size) > max_size:
+        ratio = max_size / float(max(pil_img.size))
+        new_size = (int(pil_img.size[0] * ratio), int(pil_img.size[1] * ratio))
+        return pil_img.resize(new_size, Image.LANCZOS)
+    return pil_img
 
-# --- API KEYS ---
-load_dotenv()
-OCR_SPACE_API_KEY = os.getenv("OCR_SPACE_API_KEY", "helloworld")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-
-if not GROQ_API_KEY:
-    st.error("⚠️ `GROQ_API_KEY` is not set. Please add it to your `.env` file in this directory.")
-    st.stop()
-
-# Initialize API Clients
+# --- CORE UTILS ---
 client = Groq(api_key=GROQ_API_KEY)
-EXCEL_FILE = "inventory.xlsx"
 
-# --- UI WORKFLOW ---
-uploaded_file = st.file_uploader("Drop Image Here", type=["jpg", "png", "jpeg", "webp"])
-
-if uploaded_file is not None:
-    # 1. Immediate OpenCV Auto-Crop & Sharpen
-    with st.spinner("Isolating Document from Background..."):
-        cropped_img = sharpen_image(scan_document(Image.open(uploaded_file)))
-        
-    st.image(cropped_img, caption="Isolated & Sharpened Document Preview", width=400)
-    
-    # Process Buttons
-    extract_btn = st.button("Extract Data & Save to Excel", type="primary", use_container_width=True)
-
-    if extract_btn:
-        def get_ocr_text(img_t, prefix=""):
-            ext_text = ""
-            max_r = 3
-            sf = 1.10
-            for attempt in range(max_r + 1):
-                if attempt > 0:
-                    with st.spinner(f"{prefix}Zooming 10% (Attempt {attempt}/{max_r})..."):
-                        img_t = img_t.resize((int(img_t.width * sf), int(img_t.height * sf)), Image.Resampling.LANCZOS)
-                with st.spinner(f"{prefix}Reading OCR..."):
-                    img_byte_arr = io.BytesIO()
-                    img_t.save(img_byte_arr, format='PNG')
-                    files = {"file": ("image.png", img_byte_arr.getvalue(), "image/png")}
-                    data = {"apikey": OCR_SPACE_API_KEY, "language": "eng", "isTable": True, "scale": True, "OCREngine": 2, "isOverlayRequired": False}
-                    try:
-                        response = requests.post("https://api.ocr.space/parse/image", files=files, data=data, timeout=15)
-                        if response.status_code == 200:
-                            ocr_result = response.json()
-                            if not ocr_result.get("IsErroredOnProcessing"):
-                                pr = ocr_result.get("ParsedResults", [])
-                                if pr:
-                                    t = pr[0].get("ParsedText", "").strip()
-                                    if t:
-                                        ext_text = t
-                                        break
-                    except: pass
-            return ext_text
-            
-        # 1. Competitive Extraction Pipelines
-        col_c, col_r = st.columns(2)
-        with col_c:
-            text_crop = get_ocr_text(cropped_img.copy(), "[Cropped Scan] ")
-        with col_r:
-            text_raw = get_ocr_text(sharpen_image(Image.open(uploaded_file)), "[Raw Photo] ")
-            
-        # 2. Score Both Pipelines via Rigid Regex Engine
-        c_pc, c_qty = hard_extract_math(text_crop)
-        r_pc, r_qty = hard_extract_math(text_raw)
-        
-        score_crop = (2 if c_pc else 0) + (2 if c_qty is not None else 0)
-        score_raw = (2 if r_pc else 0) + (2 if r_qty is not None else 0)
-        
-        # 3. Declare Winner
-        if score_crop >= score_raw:
-            extracted_text = text_crop
-            img = cropped_img.copy()
-            st.success(f"🏆 Winner: Cropped Document (Regex Score: {score_crop} vs {score_raw})")
-        else:
-            extracted_text = text_raw
-            img = Image.open(uploaded_file)
-            st.warning(f"🏆 Winner: Raw Image! Automatic CV crop missed vital numbers (Regex Score: {score_raw} vs {score_crop})")
-            
-        if not extracted_text:
-            st.error("Text could not be extracted from fundamentally either image via OCR.Space.")
-            st.stop()
-            
-        with st.expander("👀 View Winning Raw OCR Text"):
-            st.text(extracted_text)
-                
-        # 2. Groq AI Interpretation
-        with st.spinner("Step 2: Parsing Variables using AI..."):
-            prompt = f"""Extract the following fields from the text:
-- product_code: The exact alphanumeric code (e.g., '30161803SD01708' next to 'PRODUCT CODE')
-- product_name: The complete, full descriptive name of the item encompassing multiple lines if necessary (e.g., 'WARDROBE STORWEL ACE 2DR FULLLK RUSSETT')
-- quantity: Just the numerical value for 'NET QUANTITY' or 'UNITS' (e.g., if '1 UNIT', return 1)
-- mrp: Just the numerical price strictly next to 'MRP' (Do NOT extract the 'USP' value)
-- package: The package count (e.g., '1 OF 1')
-
-Rules:
-* Return ONLY valid JSON
-* Try to match fields even if the layout is messy (e.g. table cells might be read out of order)
-* If a field is missing, return null
-
-Example Context 1:
-Text: "PRODUCT CODE 30161803SD01111 PRODUCT WARDROBE KREX3 DR BDL NET QUANTITY 1 UNIT MRP 7652 USP 7652.00 PACKAGE 1 OF 1"
-Output: {{"product_code": "30161803SD01111", "product_name": "WARDROBE KREX3 DR BDL", "quantity": 1, "mrp": 7652, "package": "1 OF 1"}}
-
-Example Context 2:
-Text: "MARKETED & MANUFACTURED BY PRODUCT CODE 30161803SD01708 PRODUCT WARDROBE STORWEL ACE 2DR FULLLK RUSSETT NET QUANTITY 1 UNIT MRP 27376 (INCL) USP 27376.00 PACKAGE 1 OF 1"
-Output: {{"product_code": "30161803SD01708", "product_name": "WARDROBE STORWEL ACE 2DR FULLLK RUSSETT", "quantity": 1, "mrp": 27376, "package": "1 OF 1"}}
-
-Text:
-{extracted_text}
-"""
-            try:
-                chat_completion = client.chat.completions.create(
-                    messages=[
-                        {"role": "system", "content": "Return valid JSON ONLY. No markdown wrapping. No explanations."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    model="llama-3.1-8b-instant",
-                    temperature=0.1,
-                    response_format={"type": "json_object"}
-                )
-                
-                llm_response = chat_completion.choices[0].message.content
-                extracted_data = json.loads(llm_response)
-                
-            except json.JSONDecodeError:
-                st.error("AI returned malformed JSON payload.")
-                st.stop()
-            except Exception as e:
-                st.error(f"Groq API Error: {str(e)}")
-                st.stop()
-
-        # Data Cleaning + Two-Tier Merge
-        regex_pc, hard_qty = hard_extract_math(extracted_text)
-        
-        product_code = regex_pc if regex_pc else extracted_data.get("product_code")
-        product_name = extracted_data.get("product_name")
-        package_label = extracted_data.get("package")
-        
-        # We need a primary key (product_code) to ensure inventory logic succeeds
-        if not product_code:
-            st.warning("⚠️ Initial pass missed 'product_code'. Initiating Advanced Regional Crop & Zoom...")
-            import time
-            
-            # Quadrant Slicing Algorithm
-            width, height = img.size
-            w = int(width * 0.6) # 60% of width (20% overlap)
-            h = int(height * 0.6)
-            
-            quadrants = [
-                img.crop((0, 0, w, h)), 
-                img.crop((width - w, 0, width, h)),
-                img.crop((0, height - h, w, height)),
-                img.crop((width - w, height - h, width, height))
-            ]
-            
-            combined_text = ""
-            for i, quad in enumerate(quadrants):
-                with st.spinner(f"Scanning Cropped Region {i+1}/4..."):
-                    # Zoom each cropped section by 1.1x internally
-                    zoomed = quad.resize((int(w * 1.1), int(h * 1.1)), Image.Resampling.LANCZOS)
-                    img_byte_arr = io.BytesIO()
-                    zoomed.save(img_byte_arr, format='PNG')
-                    
-                    files = {"file": (f"quad_{i}.png", img_byte_arr.getvalue(), "image/png")}
-                    data = {"apikey": OCR_SPACE_API_KEY, "language": "eng", "isTable": True, "scale": True, "OCREngine": 2, "isOverlayRequired": False}
-                    time.sleep(1) # Prevent OCR.space free tier rate limiting
-                    
-                    try:
-                        quad_resp = requests.post("https://api.ocr.space/parse/image", files=files, data=data, timeout=15)
-                        if quad_resp.status_code == 200:
-                            q_json = quad_resp.json()
-                            if not q_json.get("IsErroredOnProcessing"):
-                                q_res = q_json.get("ParsedResults", [])
-                                if q_res:
-                                    t = q_res[0].get("ParsedText", "").strip()
-                                    if t: combined_text += t + "\n"
-                    except:
-                        pass
-            
-            if not combined_text.strip():
-                st.error("Fallback Failed! Zero text was readable from any zoomed crop.")
-                st.stop()
-                
-            with st.expander("👀 View Raw OCR Text (Fallback Crops)"):
-                st.text(combined_text)
-                
-            # Re-Evaluate merged dense text via LLM
-            with st.spinner("Re-evaluating overlapping crops with AI..."):
-                prompt = f"""Extract the following structured fields from the merged cropped zoomed quadrants:
-- product_code: The exact alphanumeric code (e.g., '30161803SD01708' next to 'PRODUCT CODE')
-- product_name: The complete, full descriptive name of the item encompassing multiple lines if necessary (e.g., 'WARDROBE STORWEL ACE 2DR FULLLK RUSSETT')
-- quantity: Just the numerical value for 'NET QUANTITY' or 'UNITS' (e.g., if '1 UNIT', return 1)
-- mrp: Just the numerical price strictly next to 'MRP' (Do NOT extract the 'USP' value)
-- package: The package count (e.g., '1 OF 1')
-
-Rules:
-* Return ONLY valid JSON
-* Try to match fields even if the layout is messy (e.g. table cells might be read out of order)
-* If a field is missing, return null
-
-Example Context 1:
-Text: "PRODUCT CODE 30161803SD01111 PRODUCT WARDROBE KREX3 DR BDL NET QUANTITY 1 UNIT MRP 7652 USP 7652.00 PACKAGE 1 OF 1"
-Output: {{"product_code": "30161803SD01111", "product_name": "WARDROBE KREX3 DR BDL", "quantity": 1, "mrp": 7652, "package": "1 OF 1"}}
-
-Example Context 2:
-Text: "MARKETED & MANUFACTURED BY PRODUCT CODE 30161803SD01708 PRODUCT WARDROBE STORWEL ACE 2DR FULLLK RUSSETT NET QUANTITY 1 UNIT MRP 27376 (INCL) USP 27376.00 PACKAGE 1 OF 1"
-Output: {{"product_code": "30161803SD01708", "product_name": "WARDROBE STORWEL ACE 2DR FULLLK RUSSETT", "quantity": 1, "mrp": 27376, "package": "1 OF 1"}}
-
-Text:
-{combined_text}
-"""
-                try:
-                    chat_completion = client.chat.completions.create(
-                        messages=[{"role": "system", "content": "Return valid JSON ONLY. No markdown wrapping."}, {"role": "user", "content": prompt}],
-                        model="llama-3.1-8b-instant",
-                        temperature=0.1,
-                        response_format={"type": "json_object"}
-                    )
-                    extracted_data = json.loads(chat_completion.choices[0].message.content)
-                    
-                    reg_pc, hard_qty = hard_extract_math(combined_text)
-                    product_code = reg_pc if reg_pc else extracted_data.get("product_code")
-                    product_name = extracted_data.get("product_name")
-                    package_label = extracted_data.get("package")
-                except:
-                    pass
-        
-        # Second Validation Stop
-        if not product_code:
-            st.warning("⚠️ Exhausted all deep zooms. Missing 'product_code'. Saving all other discovered fields with a NULL code!")
-            with st.expander("Show AI Raw Data Attempt"):
-                st.json(extracted_data)
-        
-        # Clean QTY Let default = 1
-        try:
-            if 'hard_qty' in locals() and hard_qty is not None:
-                qty = int(hard_qty)
-            else:
-                qty = int(extracted_data.get("quantity")) if extracted_data.get("quantity") is not None else 1
-        except (ValueError, TypeError):
-            qty = 1
-            
-        # Clean MRP
-        mrp_raw = extracted_data.get("mrp")
-        mrp = None
-        if mrp_raw is not None:
-            try:
-                if isinstance(mrp_raw, str):
-                    mrp = float(mrp_raw.replace('$', '').replace('€', '').replace('£', '').replace(',', '').strip())
+def get_ocr_text(img_t):
+    """Run OCR on a PIL image and return cleaned text."""
+    img_byte_arr = io.BytesIO()
+    img_t.save(img_byte_arr, format='JPEG', quality=85)
+    files = {"file": ("image.jpg", img_byte_arr.getvalue(), "image/jpeg")}
+    data = {"apikey": OCR_SPACE_API_KEY, "language": "eng", "isTable": True, "scale": True, "OCREngine": 2, "isOverlayRequired": False, "filetype": "JPG", "detectOrientation": True}
+    try:
+        response = requests.post("https://api.ocr.space/parse/image", files=files, data=data, timeout=20)
+        if response.status_code == 200:
+            ocr_result = response.json()
+            if not ocr_result.get("IsErroredOnProcessing"):
+                pr = ocr_result.get("ParsedResults", [])
+                if pr:
+                    t = pr[0].get("ParsedText", "").strip()
+                    if t:
+                        return re.sub(r'(?:MRP|USP)\s*[\:R]*\s*7\s+(\d+)', r'MRP \1', t, flags=re.IGNORECASE)
                 else:
-                    mrp = float(mrp_raw)
-            except (ValueError, TypeError):
-                mrp = None
-
-        # Display Final Parsed Values explicitly
-        st.success("Extraction Successful!")
-        col1, col2, col3, col4, col5 = st.columns(5)
-        col1.metric("Code", str(product_code))
-        col2.metric("Name", str(product_name))
-        col3.metric("Qty", qty)
-        col4.metric("MRP", f"${mrp:.2f}" if mrp is not None else "N/A")
-        col5.metric("Package", str(package_label) if package_label is not None else "N/A")
-
-        # 3. Excel Database Upsert Logic
-        with st.spinner("Step 3: Storing record in Excel (.xlsx)..."):
-            new_record = pd.DataFrame([{
-                "Product Code": product_code,
-                "Product Name": product_name,
-                "Quantity": qty,
-                "MRP": mrp,
-                "Package": package_label
-            }])
-            
-            if os.path.exists(EXCEL_FILE):
-                try:
-                    df = pd.read_excel(EXCEL_FILE)
-                    
-                    # Logic: If item exists, increment quantity
-                    if product_code and str(product_code) != "nan" and product_code in df["Product Code"].values:
-                        idx = df.index[df["Product Code"] == product_code].tolist()[0]
-                        df.at[idx, "Quantity"] += qty
-                        
-                        # Populate blanks if we have fresh data
-                        if product_name and pd.isna(df.at[idx, "Product Name"]):
-                            df.at[idx, "Product Name"] = product_name
-                        if mrp and pd.isna(df.at[idx, "MRP"]):
-                            df.at[idx, "MRP"] = mrp
-                            
-                        if "Package" not in df.columns:
-                            df["Package"] = None
-                        if package_label and pd.isna(df.at[idx, "Package"]):
-                            df.at[idx, "Package"] = package_label
-                            
-                        st.info(f"✅ Found existing item '{product_code}', incremented quantity to {df.at[idx, 'Quantity']}.")
-                    else:
-                        # Direct Append
-                        df = pd.concat([df, new_record], ignore_index=True)
-                        st.info(f"✅ Added brand new inventory item '{product_code}'.")
-                        
-                    df.to_excel(EXCEL_FILE, index=False)
-                except Exception as e:
-                    st.error(f"Excel read/write failed. Is the file open in Excel? Close it and try again. Error: {e}")
-                    st.stop()
+                    st.session_state["last_ocr_err"] = "No Parsed Results in JSON"
             else:
-                # Direct Create
-                try:
-                    new_record.to_excel(EXCEL_FILE, index=False)
-                    st.info(f"✅ Created a brand new `{EXCEL_FILE}` tracking sheet and inserted '{product_code}'.")
-                except Exception as e:
-                    st.error(f"Error creating excel sheet: {e}")
-                    st.stop()
-                    
-            st.balloons()
+                st.session_state["last_ocr_err"] = ocr_result.get("ErrorMessage", "Unknown OCR processing error")
+        else:
+            st.session_state["last_ocr_err"] = f"OCR.space API Error {response.status_code}"
+    except Exception as e:
+        st.session_state["last_ocr_err"] = str(e)
+    return ""
 
-# --- EXCEL INVENTORY DISPLAY ---
-if os.path.exists(EXCEL_FILE):
-    st.divider()
+def extract_from_image(uploaded_file):
+    """Multi-Stage Extraction with Full-Image Fallback."""
+    try:
+        uploaded_file.seek(0)
+        orig_pil = Image.open(uploaded_file)
+        
+        # --- STAGE 1: THE CROP ---
+        proc_img_crop = sharpen_image(scan_document(compress_image(orig_pil)))
+        text_crop = get_ocr_text(proc_img_crop)
+        res_crop = parse_and_lookup(text_crop) if text_crop else None
+        
+        # If Stage 1 found a valid Product In Price List, Return it
+        if res_crop and res_crop.get("product_name") != "Unknown Product":
+            st.session_state["last_ocr_err"] = "Scan Success (Stage: Crop)"
+            return res_crop
+            
+        # --- STAGE 2: THE FALLBACK (Full Image) ---
+        st.session_state["last_ocr_err"] = "Fallback: Trying Full Image (Product Not in List)"
+        proc_img_full = sharpen_image(compress_image(orig_pil))
+        text_full = get_ocr_text(proc_img_full)
+        res_full = parse_and_lookup(text_full) if text_full else None
+        
+        if res_full:
+            st.session_state["last_ocr_err"] = "Scan Success (Stage: Full Image)"
+            return res_full
+            
+    except Exception as e:
+        st.session_state["last_ocr_err"] = f"Extraction System Error: {e}"
     
-    col_header, col_btn = st.columns([0.8, 0.2])
-    with col_header:
-        st.subheader("📚 Live Local Inventory")
-    with col_btn:
-        if st.button("🗑️ Clear Inventory", use_container_width=True):
-            try:
-                os.remove(EXCEL_FILE)
-                st.success("Inventory cleared successfully!")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Failed to clear: {e}. Close the Excel file securely first.")
+    return None
+
+def parse_and_lookup(text):
+    """Parse text and verify against Golden Database using Similarity."""
+    # 1. Pattern-Based Extraction
+    pc, qty = hard_extract_math(text)
+    if not pc:
+        pc = repair_ocr_code(text)
+    
+    # 2. LLM Extraction (Strict JSON Only)
+    prompt = f"JSON ONLY. Fields: product_code, quantity (int), mrp (num), package. (NO DIMENSIONS). Text: {text}"
+    try:
+        res = client.chat.completions.create(
+            messages=[{"role": "system", "content": "Return ONLY JSON with 4 keys: product_code, quantity, mrp, package. Forbidden: dimensions, width, height, length, material."}, {"role": "user", "content": prompt}],
+            model="llama-3.1-8b-instant", temperature=0.1, response_format={"type": "json_object"}
+        )
+        ext_data = json.loads(res.choices[0].message.content)
+        # Explicit clean: throw away any rogue fields
+        allowed_keys = ["product_code", "quantity", "mrp", "package"]
+        ext_data = {k: ext_data[k] for k in allowed_keys if k in ext_data}
+    except Exception:
+        ext_data = {}
+
+    final_pc = pc if pc else ext_data.get("product_code")
+    if not final_pc: return None
+    
+    final_pc = str(final_pc).upper().replace(" ", "").strip()
+    st.session_state["raw_ocr_code"] = final_pc # Log for diagnostics
+
+    # 3. Golden Database Lookup & Fuzzy Similarity
+    p_name = "Unknown Product"
+    base_price = "N/A"
+    p_category = "N/A"
+
+    if price_list_df is not None:
+        p_code_str = str(final_pc)
+        # Try Exact
+        matches = price_list_df[price_list_df["LN Code"] == p_code_str]
+        
+        # Try Fuzzy Correction (Swaps)
+        if matches.empty:
+            swaps = {"3": "8", "8": "3", "S": "5", "5": "S", "0": "O", "O": "0", "1": "I", "I": "1"}
+            for i, char in enumerate(p_code_str):
+                if char in swaps:
+                    test_code = p_code_str[:i] + swaps[char] + p_code_str[i+1:]
+                    matches = price_list_df[price_list_df["LN Code"] == test_code]
+                    if not matches.empty:
+                        final_pc = test_code
+                        break
+
+        # Try Similarity (Levenshtein) - If still not found
+        if matches.empty:
+            from difflib import SequenceMatcher
+            best_sc = 0
+            best_code = None
+            # Only search nearby if the code is at least 10 chars
+            if len(p_code_str) > 10:
+                for db_code in price_list_df["LN Code"].head(5000): # Limit search to avoid lag
+                    ratio = SequenceMatcher(None, p_code_str, db_code).ratio()
+                    if ratio > 0.85 and ratio > best_sc:
+                        best_sc = ratio
+                        best_code = db_code
                 
+                if best_code:
+                    final_pc = best_code
+                    matches = price_list_df[price_list_df["LN Code"] == final_pc]
+
+        if not matches.empty:
+            row = matches.iloc[0]
+            p_name = str(row.get("LN Description", p_name))
+            base_price = str(row.get("Unit Consumer Basic", base_price))
+            p_category = str(row.get("Category", p_category))
+
+    qty_val = qty if qty is not None else sanitize_quantity(ext_data.get("quantity", 1))
+    
+    return {
+        "product_code": str(final_pc), "product_name": p_name, "quantity": qty_val,
+        "mrp": ext_data.get("mrp"), "package": ext_data.get("package", "N/A"), "base_price": base_price, "category": p_category
+    }
+
+# --- PAGES ---
+current_page = st.session_state.get("page", "Inventory")
+
+# 1. INVENTORY PAGE
+if current_page == "Inventory":
+    st.title("📦 Premium Inventory Dashboard")
+    
     if os.path.exists(EXCEL_FILE):
         try:
-            final_df = pd.read_excel(EXCEL_FILE)
-            st.dataframe(final_df, use_container_width=True, hide_index=True)
-        except:
-            st.warning(f"Could not load the `{EXCEL_FILE}` preview. Is the file open or corrupted?")
+            # Aggregate all sheets into one
+            all_inv_dfs = []
+            xls_display = pd.ExcelFile(EXCEL_FILE)
+            for sn in xls_display.sheet_names:
+                if sn.lower() not in ("sheet1", "sheet 1"):
+                    sdf = pd.read_excel(xls_display, sheet_name=sn)
+                    sdf["Category"] = sn
+                    all_inv_dfs.append(sdf)
+            
+            if not all_inv_dfs:
+                st.info("Inventory is empty.")
+                st.stop()
+                
+            main_df = pd.concat(all_inv_dfs, ignore_index=True)
+            thresholds = load_thresholds()
+            
+            # --- METRICS ---
+            col1, col2, col3 = st.columns(3)
+            total_sku = len(main_df["Product Code"].unique())
+            total_qty = int(main_df["Quantity"].sum())
+            
+            # Count Low Stock items using thresholds
+            low_stock_count = 0
+            for _, row in main_df.iterrows():
+                pc = str(row["Product Code"])
+                t_val = thresholds.get(pc, 0)
+                thresh = t_val.get("min", 0) if isinstance(t_val, dict) else t_val
+                if thresh > 0 and row["Quantity"] < thresh: low_stock_count += 1
+                
+            col1.metric("Total items", total_sku)
+            col2.metric("Total units", total_qty)
+            col3.metric("Low Stock Alerts", low_stock_count, delta=-low_stock_count, delta_color="inverse")
+
+            st.divider()
+            
+            # --- SEARCH & FILTER ---
+            search_query = st.text_input("🔍 Search Inventory", placeholder="Search by Code or Product Name...").lower()
+            cat_filter = st.multiselect("🏷️ Filter by Category", main_df["Category"].unique())
+            
+            # Apply Filters
+            filtered_df = main_df.copy()
+            if search_query:
+                filtered_df = filtered_df[
+                    filtered_df["Product Code"].astype(str).str.lower().str.contains(search_query) |
+                    filtered_df["Product Name"].astype(str).str.lower().str.contains(search_query)
+                ]
+            if cat_filter:
+                filtered_df = filtered_df[filtered_df["Category"].isin(cat_filter)]
+            
+            # --- BETTER READABILITY STYLING ---
+            def stock_heatmap(row):
+                pc = str(row["Product Code"])
+                t_val = thresholds.get(pc, 0)
+                thresh = t_val.get("min", 0) if isinstance(t_val, dict) else t_val
+                qty = row["Quantity"]
+                
+                # Base styles (Normal)
+                styles = [""] * len(row)
+                qty_idx = list(filtered_df.columns).index("Quantity")
+                
+                if qty == 0:
+                    # Clear Red warning for Out of Stock (Whole Row)
+                    return ["background-color: #fee2e2; color: #991b1b"] * len(row)
+                elif qty < thresh:
+                    # Subtle Orange warning for Low Stock (Only the Quantity cell)
+                    styles[qty_idx] = "background-color: #fef3c7; color: #92400e; font-weight: bold"
+                
+                return styles
+
+            if not filtered_df.empty:
+                styled_df = filtered_df.style.apply(stock_heatmap, axis=1)
+                st.dataframe(styled_df, use_container_width=True, hide_index=True)
+            else:
+                st.info("No matching items found.")
+
+        except Exception as e:
+            st.error(f"Error loading inventory dashboard: {e}")
+    else:
+        st.info("Inventory is empty. Start by updating stock!")
+
+# 2. HISTORY PAGE
+elif current_page == "History":
+    st.title("📜 Transaction History")
+    
+    # 1. Date Selector
+    sel_date = st.date_input("📅 Select Date", datetime.now().date())
+    
+    if os.path.exists(TXN_FILE):
+        try:
+            txn_df = pd.read_csv(TXN_FILE)
+            if txn_df.empty:
+                st.info("No history recorded yet.")
+                st.stop()
+
+            # Ensure minimal columns exist
+            for col in ["Timestamp", "User", "Status"]:
+                if col not in txn_df.columns: txn_df[col] = "N/A"
+
+            # Filter by Date
+            txn_df['Date'] = pd.to_datetime(txn_df['Timestamp']).dt.date
+            day_df = txn_df[txn_df['Date'] == sel_date].copy()
+
+            if st.session_state["user"] != "admin":
+                # Staff see only their own for that day
+                display_df = day_df[day_df["User"].astype(str).str.strip() == str(st.session_state["user"]).strip()].copy()
+                st.info(f"Showing history for {st.session_state['name']} on {sel_date}")
+            else:
+                # Admin see all for that day
+                display_df = day_df.copy()
+                st.info(f"Administrator View: Showing all transactions for {sel_date}")
+                
+                # Admin Deletion Button for the day
+                if not display_df.empty:
+                    if st.button(f"🗑️ Clear All History for {sel_date}", type="secondary", use_container_width=True):
+                        # Filter OUT the rows for this date in the ORIGINAL txn_df
+                        remaining_df = txn_df[txn_df['Date'] != sel_date]
+                        remaining_df.drop(columns=['Date'], inplace=True)
+                        remaining_df.to_csv(TXN_FILE, index=False)
+                        st.success(f"History for {sel_date} cleared!")
+                        st.rerun()
+            
+            if display_df.empty:
+                st.write(f"No transactions found for {sel_date}.")
+            else:
+                # Column sanitizing for sort
+                sort_col = "Timestamp" if "Timestamp" in display_df.columns else display_df.columns[0]
+                display_df = display_df.sort_values(sort_col, ascending=False)
+                if 'Date' in display_df.columns: display_df.drop(columns=['Date'], inplace=True)
+
+                # Style failed/partial entries
+                def style_status(row):
+                    color = ""
+                    if str(row.get("Status", "")).lower() == "failed": color = "background-color: #ffcccc"
+                    elif str(row.get("Status", "")).lower() == "partial": color = "background-color: #fff4cc"
+                    return [color] * len(row)
+
+                styled_df = display_df.style.apply(style_status, axis=1)
+                st.dataframe(styled_df, use_container_width=True, hide_index=True)
+        except Exception as e:
+            st.error(f"Error reading history: {e}")
+    else:
+        st.info("No history recorded yet.")
+
+# 3. STOCK MAINTENANCE PAGE (Admin Only)
+elif current_page == "Stock Maintenance" and st.session_state.get("user") == "admin":
+    st.title("📉 Minimum Stock Maintenance")
+    thresholds = load_thresholds()
+    
+    # 1. Add/Update Threshold Form
+    st.subheader("⚙️ Set Product Threshold")
+    if price_list_df is not None:
+        # Create search labels: "Code | Description"
+        p_options = [f"{row['LN Code']} | {row['LN Description']}" for _, row in price_list_df.iterrows()]
+        sel_raw = st.selectbox("Search Product from Price List", [""] + p_options, help="Type to filter products")
+        
+        if sel_raw:
+            p_code = sel_raw.split(" | ")[0]
+            p_name = sel_raw.split(" | ")[1]
+            t_val = thresholds.get(p_code, 0)
+            curr_t = t_val.get("min", 0) if isinstance(t_val, dict) else t_val
+            
+            with st.form("Set Threshold"):
+                st.write(f"Editing: **{p_name}** (`{p_code}`)")
+                new_t = st.number_input("Desired Minimum Stock Level", min_value=0, value=curr_t)
+                if st.form_submit_button("Confirm & Save"):
+                    thresholds[p_code] = {"name": p_name, "min": new_t}
+                    save_thresholds(thresholds)
+                    st.success(f"Threshold for {p_code} set to {new_t}!")
+                    st.rerun()
+
+    # 2. View All Thresholds
+    st.divider()
+    st.subheader("📋 Minimum Stock Values")
+    
+    if thresholds:
+        # Loop through existing thresholds to add Edit/Delete rows
+        for k, v in list(thresholds.items()):
+            # Canonicalize data (handle old int or new dict)
+            name = v.get("name", "N/A") if isinstance(v, dict) else "N/A"
+            min_val = v.get("min", 0) if isinstance(v, dict) else v
+            
+            row_col1, row_col2 = st.columns([3, 1])
+            with row_col1:
+                st.write(f"**{name}** (`{k}`): **{min_val}**")
+            with row_col2:
+                with st.popover("⋮"):
+                    # Edit Option
+                    st.write(f"Edit Threshold: **{name}**")
+                    new_edit_t = st.number_input("New Min Level", min_value=0, value=min_val, key=f"edit_val_{k}")
+                    if st.button("Update Value", key=f"btn_edit_{k}", use_container_width=True, type="primary"):
+                        thresholds[k] = {"name": name, "min": new_edit_t}
+                        save_thresholds(thresholds)
+                        st.toast(f"Updated {k} to {new_edit_t}")
+                        st.rerun()
+                    
+                    st.divider()
+                    # Delete Option
+                    if st.button("🗑️ Delete", key=f"btn_del_{k}", use_container_width=True, type="secondary"):
+                        del thresholds[k]
+                        save_thresholds(thresholds)
+                        st.toast(f"Threshold for {k} deleted.")
+                        st.rerun()
+    else:
+        st.info("No custom thresholds set. Alerting on 0 quantity only.")
+
+# 4. MANAGE STAFF PAGE (Admin Only)
+elif current_page == "Manage Staff" and st.session_state.get("user") == "admin":
+    st.title("🛠️ Manage Staff Accounts")
+    
+    # Reload users.json to ensure freshness
+    with open("users.json", "r") as f:
+        current_users = json.load(f)
+    
+    # 1. List Current Staff
+    st.subheader("📋 Current Accounts")
+    
+    for uid, info in list(current_users.items()):
+        if uid == "admin": continue
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.write(f"**{info['name']}** (`{uid}`)")
+        with col2:
+            with st.popover("⋮"):
+                if st.button("🗑️ Delete Account", key=f"del_{uid}", use_container_width=True, type="secondary"):
+                    del current_users[uid]
+                    with open("users.json", "w") as f:
+                        json.dump(current_users, f, indent=2)
+                    st.toast(f"Account for '{uid}' deleted.")
+                    st.rerun()
+
+    st.divider()
+    
+    # 2. Add New Staff member
+    st.subheader("👤 Register New Staff")
+    with st.form("Add User"):
+        new_uid = st.text_input("Username (e.g. staff2)").strip().lower()
+        new_name = st.text_input("Full Name (e.g. John Doe)").strip()
+        new_pass = st.text_input("Password", type="password").strip()
+        
+        if st.form_submit_button("Register Account"):
+            if not new_uid or not new_name or not new_pass:
+                st.error("All fields are required!")
+            elif new_uid in current_users:
+                st.error(f"Username '{new_uid}' already exists!")
+            else:
+                current_users[new_uid] = {"password": new_pass, "name": new_name}
+                with open("users.json", "w") as f:
+                    json.dump(current_users, f, indent=2)
+                st.success(f"Success! Account for {new_name} is now active.")
+                st.rerun()
+
+# 4. UPDATE STOCK PAGE
+elif current_page == "Update Stock":
+    st.title("🔄 Update Stock")
+    
+    # Step 1: Big Buttons for Selection
+    if st.session_state.get("transaction_type") is None:
+        col1, col2 = st.columns(2)
+        if col1.button("➕ INCOMING\n(Add Stock)", type="primary", use_container_width=True):
+            st.session_state["transaction_type"] = "Incoming"
+            st.rerun()
+        if col2.button("➖ OUTGOING\n(Reduce Stock)", type="primary", use_container_width=True):
+            st.session_state["transaction_type"] = "Outgoing"
+            st.rerun()
+    else:
+        transaction_type = st.session_state["transaction_type"]
+        st.info(f"Mode: **{transaction_type.upper()}** (Tap 'Update Stock' in menu to change)")
+        
+        uploaded_files = st.file_uploader("Drop Scan/Label Images Here", type=["jpg", "png", "jpeg", "webp"], accept_multiple_files=True)
+
+        if uploaded_files:
+            # --- NEW PREVIEW SECTION ---
+            st.write("📸 **Uploaded Previews:**")
+            preview_cols = st.columns(4)
+            for idx, uf in enumerate(uploaded_files):
+                with preview_cols[idx % 4]:
+                    st.image(Image.open(uf), use_container_width=True, caption=f"File {idx+1}")
+            
+            st.divider()
+            
+            if st.button("🔍 Extract & Process All", type="primary", use_container_width=True):
+                # Phase 1: Scan files
+                st.subheader("📋 Scanning Files...")
+                status_container = st.container()
+                extracted_items = []
+                
+                for i, uf in enumerate(uploaded_files, 1):
+                    with st.spinner(f"Processing {uf.name}..."):
+                        result = extract_from_image(uf)
+                    
+                    col_icon, col_txt = st.columns([1, 4])
+                    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    
+                    if result:
+                        result["filename"] = uf.name
+                        extracted_items.append(result)
+                        with col_icon:
+                            st.image(Image.open(uf).resize((60, 60)), use_container_width=False)
+                        with col_txt:
+                            st.write(f"✅ **{uf.name}**\n`{result['product_code']}`")
+                    else:
+                        # LOG FAILURE TO HISTORY
+                        with col_icon:
+                            st.error("❌")
+                        with col_txt:
+                            st.write(f"**{uf.name}**\n*Failed to extract*")
+                        
+                        log_data = pd.DataFrame([{
+                            "Timestamp": current_time,
+                            "User": st.session_state["user"],
+                            "Type": transaction_type,
+                            "Product Code": "N/A",
+                            "Product Name": "Extraction Failed",
+                            "Category": "N/A",
+                            "Qty Diff": 0,
+                            "Status": "Failed",
+                            "Reason": "OCR/LLM Failed"
+                        }])
+                        if os.path.exists(TXN_FILE):
+                            log_data.to_csv(TXN_FILE, mode='a', header=False, index=False)
+                        else:
+                            log_data.to_csv(TXN_FILE, index=False)
+
+                if extracted_items:
+                    # Phase 2: Process table
+                    st.divider()
+                    st.subheader(f"📦 Processed Product Codes ({len(extracted_items)}/{len(uploaded_files)})")
+                    display_data = []
+                    for item in extracted_items:
+                        qty_change = item["quantity"] if transaction_type == "Incoming" else -item["quantity"]
+                        display_data.append({
+                            "File": item["filename"], "Product Code": item["product_code"], "Product Name": item["product_name"],
+                            "Category": item["category"], "Qty Change": f"{'+' if qty_change > 0 else ''}{qty_change}",
+                            "Base Price": f"₹{item['base_price']}", "MRP": item["mrp"] if item["mrp"] else "N/A", "Package": item["package"]
+                        })
+                    st.dataframe(pd.DataFrame(display_data), use_container_width=True, hide_index=True)
+
+                    # Save to DB
+                    with st.spinner("Recording & updating inventory..."):
+                        all_sheets = {}
+                        inv_cols = ["Product Code", "Product Name", "Quantity", "Base Price", "MRP", "Package"]
+                        if os.path.exists(EXCEL_FILE):
+                            try:
+                                xls_inv = pd.ExcelFile(EXCEL_FILE)
+                                for sn in xls_inv.sheet_names:
+                                    if sn.lower() not in ("sheet1", "sheet 1"):
+                                        all_sheets[sn] = pd.read_excel(xls_inv, sheet_name=sn)
+                            except Exception: pass
+
+                        errors = []
+                        for item in extracted_items:
+                            p_code = item["product_code"]
+                            p_name = item["product_name"]
+                            qty_change = item["quantity"] if transaction_type == "Incoming" else -item["quantity"]
+                            sheet_name = item["category"] if item["category"] != "N/A" else "Uncategorized"
+                            status = "Success"
+                            reason = ""
+
+                            if item["category"] == "N/A":
+                                status = "Partial"
+                                reason = "Not in Price List"
+
+                            if sheet_name not in all_sheets:
+                                all_sheets[sheet_name] = pd.DataFrame(columns=inv_cols)
+                            df = all_sheets[sheet_name]
+
+                            if str(p_code) in df["Product Code"].astype(str).values:
+                                idx = df.index[df["Product Code"].astype(str) == str(p_code)].tolist()[0]
+                                new_inv_qty = df.at[idx, "Quantity"] + qty_change
+                                if new_inv_qty < 0:
+                                    errors.append(f"'{p_code}': Out of stock")
+                                    status = "Failed"
+                                    reason = "Insufficient Stock"
+                                else:
+                                    df.at[idx, "Quantity"] = new_inv_qty
+                                    df.at[idx, "Product Name"] = p_name
+                            else:
+                                if qty_change < 0:
+                                    errors.append(f"'{p_code}': Not in inventory")
+                                    status = "Failed"
+                                    reason = "Not in Stock"
+                                else:
+                                    df = pd.concat([df, pd.DataFrame([{"Product Code": p_code, "Product Name": p_name, "Quantity": qty_change, "Base Price": item["base_price"], "MRP": item["mrp"], "Package": item["package"]}])], ignore_index=True)
+
+                            all_sheets[sheet_name] = df
+                            
+                            # Log Transaction
+                            log_data = pd.DataFrame([{
+                                "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                "User": st.session_state["user"],
+                                "Type": transaction_type,
+                                "Product Code": p_code, "Product Name": p_name, "Category": sheet_name,
+                                "Qty Diff": qty_change, "Status": status, "Reason": reason
+                            }])
+                            if os.path.exists(TXN_FILE):
+                                log_data.to_csv(TXN_FILE, mode='a', header=False, index=False)
+                            else:
+                                log_data.to_csv(TXN_FILE, index=False)
+
+                        with pd.ExcelWriter(EXCEL_FILE, engine="openpyxl") as writer:
+                            for sn, sdf in all_sheets.items():
+                                sdf.to_excel(writer, sheet_name=sn[:31], index=False)
+
+                    if errors:
+                        for e in errors: st.error(f"⚠️ Skipped {e}")
+                    st.balloons()
+                    st.success(f"✅ Finished Processing!")
+# 6. MANAGE MASTER LIST (Admin Only)
+elif current_page == "Manage Master List":
+    st.title("🛠️ Manage Master Price List")
+    st.info("Edit your 'Golden Database' here. Changes are saved back to the master Excel file.")
+    
+    xls_path = "priceListHomeFurniture.xlsx"
+    if not os.path.exists(xls_path):
+        st.error("Master Excel file not found!")
+        st.stop()
+        
+    xls = pd.ExcelFile(xls_path)
+    sheet_name = st.selectbox("Select Sheet to Edit", xls.sheet_names)
+    
+    # Read with header=5 to preserve the 6-row offset
+    df = pd.read_excel(xls, sheet_name=sheet_name, header=5)
+    
+    st.write(f"📝 **Editing: {sheet_name}**")
+    edited_df = st.data_editor(df, num_rows="dynamic", use_container_width=True, key=f"editor_{sheet_name}")
+    
+    if st.button("💾 Save Changes to Excel", type="primary", use_container_width=True):
+        try:
+            with st.spinner("Updating master database..."):
+                from openpyxl import load_workbook
+                
+                # 1. Save data to a temporary in-memory buffer
+                buffer = io.BytesIO()
+                with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                    edited_df.to_excel(writer, sheet_name=sheet_name, index=False)
+                
+                # 2. Open original workbook and replace data from Row 7 (index 6, header=5) down
+                wb = load_workbook(xls_path)
+                ws = wb[sheet_name]
+                
+                # Clear rows from 7 downwards (preserving top 6 rows)
+                for row in ws.iter_rows(min_row=7):
+                    for cell in row: cell.value = None
+                
+                # Write Header and Data
+                # Headers at Row 6 (Excel indexing is 1-based, so Row 6)
+                for c_idx, col in enumerate(edited_df.columns, 1):
+                    ws.cell(row=6, column=c_idx, value=col)
+                
+                # Data starting at Row 7
+                for r_idx, row in enumerate(edited_df.values, 7):
+                    for c_idx, val in enumerate(row, 1):
+                        ws.cell(row=r_idx, column=c_idx, value=val)
+                        
+                wb.save(xls_path)
+                
+                # 3. Clear Cache to force reload
+                if os.path.exists(PRICE_CACHE): os.remove(PRICE_CACHE)
+                st.cache_data.clear()
+                
+                st.success(f"Successfully updated '{sheet_name}' in master Excel file!")
+                st.balloons()
+        except Exception as e:
+            st.error(f"Save Failed: {e}")
