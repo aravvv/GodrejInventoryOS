@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from streamlit_cookies_manager import EncryptedCookieManager
 
 # --- CONFIGURATION & AUTH ---
-st.set_page_config(page_title="Inventory OS", page_icon="📦", layout="centered")
+st.set_page_config(page_title="Godrej InventoryOS", page_icon="📦", layout="centered")
 
 # Native Cloud Secrets: Safe for Deployment
 GROQ_API_KEY = st.secrets.get("GROQ_API_KEY") or os.getenv("GROQ_API_KEY")
