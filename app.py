@@ -6,7 +6,7 @@ from PIL import Image
 from dotenv import load_dotenv
 from groq import Groq
 from datetime import datetime, timedelta
-import extra_streamlit_components as stx
+from streamlit_cookies_manager import EncryptedCookieManager
 
 # --- CONFIGURATION & AUTH ---
 st.set_page_config(page_title="Inventory OS", page_icon="📦", layout="centered")
@@ -28,20 +28,25 @@ def save_thresholds(t_dict):
     with open(THRESHOLD_FILE, "w") as f:
         json.dump(t_dict, f, indent=2)
 
-# 1. Persistent Login System (24-hour Cookies)
-def get_manager():
-    return stx.CookieManager()
-
-cookie_manager = get_manager()
+# 1. Persistent Login System (6-hour Encrypted Cookies)
+SESSION_HOURS = 6
+cookies = EncryptedCookieManager(
+    prefix="inv_os_",
+    password=st.secrets.get("COOKIE_SECRET") or os.getenv("COOKIE_SECRET", "godrej-inv-secret-key-2024")
+)
+if not cookies.ready():
+    st.stop()  # Wait for cookies to load (synchronous & reliable)
 
 if "authenticated" not in st.session_state:
     st.session_state["authenticated"] = False
-    
-    # Try Cookie Recovery (only if user didn't explicitly log out)
-    if not st.session_state.get("logged_out", False):
-        c_user = cookie_manager.get("inv_user")
-        if c_user:
-            try:
+
+    # Try Cookie Recovery
+    c_user = cookies.get("inv_user")
+    c_time = cookies.get("inv_login_time")
+    if c_user and c_time:
+        try:
+            login_dt = datetime.fromisoformat(c_time)
+            if datetime.now() - login_dt < timedelta(hours=SESSION_HOURS):
                 with open("users.json", "r") as f:
                     v_users = json.load(f)
                 if c_user in v_users:
@@ -49,8 +54,8 @@ if "authenticated" not in st.session_state:
                     st.session_state["user"] = c_user
                     st.session_state["name"] = v_users[c_user]["name"]
                     st.session_state["page"] = "Inventory" if c_user == "admin" else "Update Stock"
-            except Exception:
-                pass
+        except Exception:
+            pass  # Corrupt cookie, just show login
 
 if not st.session_state["authenticated"]:
     st.title("🔒 Staff Login")
@@ -61,8 +66,10 @@ if not st.session_state["authenticated"]:
             with open("users.json", "r") as f:
                 v_users = json.load(f)
             if username in v_users and v_users[username]["password"] == password:
-                # Set 24-hour cookie
-                cookie_manager.set("inv_user", username, expires_at=datetime.now() + timedelta(days=1))
+                # Set persistent cookies (6-hour session)
+                cookies["inv_user"] = username
+                cookies["inv_login_time"] = datetime.now().isoformat()
+                cookies.save()
                 st.session_state["authenticated"] = True
                 st.session_state["user"] = username
                 st.session_state["name"] = v_users[username]["name"]
@@ -165,15 +172,14 @@ if st.session_state.get("user") == "admin":
         st.rerun()
 
 if st.sidebar.button("Logout", use_container_width=True):
-    # Safely delete cookie (avoid KeyError if cookie doesn't exist)
+    # Safely clear persistent cookies
     try:
-        all_cookies = cookie_manager.get_all()
-        if "inv_user" in (all_cookies or {}):
-            cookie_manager.delete("inv_user")
+        cookies["inv_user"] = ""
+        cookies["inv_login_time"] = ""
+        cookies.save()
     except Exception:
         pass
     st.session_state["authenticated"] = False
-    st.session_state["logged_out"] = True  # Prevent cookie re-login
     st.rerun()
 
 if st.session_state.get("user") == "admin":
