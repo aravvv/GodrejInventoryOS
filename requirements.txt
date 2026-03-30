@@ -1,0 +1,10 @@
+extra-streamlit-components
+openpyxl
+pandas
+Pillow
+python-dotenv
+requests
+streamlit
+streamlit-cookies-manager
+opencv-python-headless
+numpy<2.0.0

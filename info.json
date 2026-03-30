@@ -1,0 +1,81 @@
+{
+  "columns": [
+    "Unnamed: 0",
+    "FORMAT NO: F - CPL - MKT - PL13A",
+    "Unnamed: 2",
+    "FORMAT REV NO.: 00",
+    "DATE: 01-06-2019"
+  ],
+  "head": [
+    {
+      "Unnamed: 0": "",
+      "FORMAT NO: F - CPL - MKT - PL13A": "DOCUMENT TYPE: PRODUCT PRICE LIST (INTERNAL)",
+      "Unnamed: 2": "",
+      "FORMAT REV NO.: 00": "",
+      "DATE: 01-06-2019": ""
+    },
+    {
+      "Unnamed: 0": "",
+      "FORMAT NO: F - CPL - MKT - PL13A": "DOCUMENT NO: CPL/2025-2026/1",
+      "Unnamed: 2": "",
+      "FORMAT REV NO.: 00": "DOC REV NO: 002",
+      "DATE: 01-06-2019": "15th July 2025"
+    },
+    {
+      "Unnamed: 0": "",
+      "FORMAT NO: F - CPL - MKT - PL13A": "Consumer Basic Prices effective from 15th July 2025",
+      "Unnamed: 2": "",
+      "FORMAT REV NO.: 00": "",
+      "DATE: 01-06-2019": ""
+    },
+    {
+      "Unnamed: 0": "",
+      "FORMAT NO: F - CPL - MKT - PL13A": "HOME STORAGE",
+      "Unnamed: 2": "",
+      "FORMAT REV NO.: 00": "",
+      "DATE: 01-06-2019": ""
+    },
+    {
+      "Unnamed: 0": "",
+      "FORMAT NO: F - CPL - MKT - PL13A": "HSN CODE",
+      "Unnamed: 2": "LN Code",
+      "FORMAT REV NO.: 00": "LN Description",
+      "DATE: 01-06-2019": "Unit Consumer Basic"
+    },
+    {
+      "Unnamed: 0": "",
+      "FORMAT NO: F - CPL - MKT - PL13A": "CENTURION ",
+      "Unnamed: 2": "",
+      "FORMAT REV NO.: 00": "",
+      "DATE: 01-06-2019": ""
+    },
+    {
+      "Unnamed: 0": "",
+      "FORMAT NO: F - CPL - MKT - PL13A": 94032090,
+      "Unnamed: 2": "30161803SD00024",
+      "FORMAT REV NO.: 00": "Cen NOV ESX LCK Led Burgandy",
+      "DATE: 01-06-2019": 48939
+    },
+    {
+      "Unnamed: 0": "",
+      "FORMAT NO: F - CPL - MKT - PL13A": 94032090,
+      "Unnamed: 2": "30161803SD00650",
+      "FORMAT REV NO.: 00": "Centurian Welded Midnight Blue",
+      "DATE: 01-06-2019": 48939
+    },
+    {
+      "Unnamed: 0": "",
+      "FORMAT NO: F - CPL - MKT - PL13A": 94032090,
+      "Unnamed: 2": "30161803SD02012",
+      "FORMAT REV NO.: 00": "Cen Std Emerald",
+      "DATE: 01-06-2019": 48939
+    },
+    {
+      "Unnamed: 0": "",
+      "FORMAT NO: F - CPL - MKT - PL13A": 94032090,
+      "Unnamed: 2": "30161803SD02013",
+      "FORMAT REV NO.: 00": "Cen Std Velvet Mauve  SG",
+      "DATE: 01-06-2019": 48939
+    }
+  ]
+}

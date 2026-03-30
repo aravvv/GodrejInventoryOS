@@ -1,0 +1,14 @@
+{
+  "admin": {
+    "password": "123",
+    "name": "Admin"
+  },
+  "anuj": {
+    "password": "123",
+    "name": "Anuj"
+  },
+  "nirmal": {
+    "password": "123",
+    "name": "Nirmal"
+  }
+}
