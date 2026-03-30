@@ -53,7 +53,9 @@ if "authenticated" not in st.session_state:
                     st.session_state["authenticated"] = True
                     st.session_state["user"] = c_user
                     st.session_state["name"] = v_users[c_user]["name"]
+                    # Restore correct default landing page
                     st.session_state["page"] = "Inventory" if c_user == "admin" else "Update Stock"
+                    st.session_state.setdefault("transaction_type", None)
         except Exception:
             pass  # Corrupt cookie, just show login
 
@@ -697,6 +699,10 @@ elif current_page == "Manage Staff" and st.session_state.get("user") == "admin":
 # 4. UPDATE STOCK PAGE
 elif current_page == "Update Stock":
     st.title("🔄 Update Stock")
+    
+    # Ensure transaction_type exists (handles post-refresh cookie recovery)
+    if "transaction_type" not in st.session_state:
+        st.session_state["transaction_type"] = None
     
     # Step 1: Big Buttons for Selection
     if st.session_state.get("transaction_type") is None:
