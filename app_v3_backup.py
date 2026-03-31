@@ -6,17 +6,32 @@ from PIL import Image
 from dotenv import load_dotenv
 from groq import Groq
 from datetime import datetime, timedelta
-import extra_streamlit_components as stx
+from streamlit_cookies_manager import EncryptedCookieManager
 
 # --- CONFIGURATION & AUTH ---
 st.set_page_config(page_title="Inventory OS", page_icon="📦", layout="centered")
 
-# Native Cloud Secrets: Safe for Deployment
-GROQ_API_KEY = st.secrets.get("GROQ_API_KEY") or os.getenv("GROQ_API_KEY")
-OCR_SPACE_API_KEY = st.secrets.get("OCR_SPACE_API_KEY") or os.getenv("OCR_SPACE_API_KEY", "helloworld")
+# 1. Environment Loading (Local & Cloud)
+load_dotenv() 
+
+def get_secret(key, default=None):
+    """Safely get secrets from st.secrets (Cloud) or os.getenv (Local)."""
+    try:
+        # Some Streamlit versions/environments crash on st.secrets if no .toml exists
+        if key in st.secrets:
+            return st.secrets[key]
+    except Exception:
+        pass
+    return os.getenv(key, default)
+
+GROQ_API_KEY = get_secret("GROQ_API_KEY")
+OCR_SPACE_API_KEY = get_secret("OCR_SPACE_API_KEY", "helloworld")
+COOKIE_SECRET = get_secret("COOKIE_SECRET", "godrej-inv-secret-key-2024")
+PRICE_LIST_EXCEL = "priceListHomeFurniture.xlsx"
 EXCEL_FILE = "inventory.xlsx"
 TXN_FILE = "transactions.csv"
 THRESHOLD_FILE = "thresholds.json"
+ORDERS_FILE = "orders.json"
 
 def load_thresholds():
     if os.path.exists(THRESHOLD_FILE):
@@ -28,25 +43,48 @@ def save_thresholds(t_dict):
     with open(THRESHOLD_FILE, "w") as f:
         json.dump(t_dict, f, indent=2)
 
-# 1. Persistent Login System (24-hour Cookies)
-def get_manager():
-    return stx.CookieManager()
+def load_orders():
+    if os.path.exists(ORDERS_FILE):
+        try:
+            with open(ORDERS_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
 
-cookie_manager = get_manager()
+def save_orders(o_list):
+    with open(ORDERS_FILE, "w") as f:
+        json.dump(o_list, f, indent=2)
+
+# 1. Persistent Login System (6-hour Encrypted Cookies)
+SESSION_HOURS = 6
+cookies = EncryptedCookieManager(
+    prefix="inv_os_",
+    password=COOKIE_SECRET
+)
+if not cookies.ready():
+    st.stop()  # Wait for cookies to load (synchronous & reliable)
 
 if "authenticated" not in st.session_state:
     st.session_state["authenticated"] = False
-    
+
     # Try Cookie Recovery
-    c_user = cookie_manager.get("inv_user")
-    if c_user:
-        with open("users.json", "r") as f:
-            v_users = json.load(f)
-        if c_user in v_users:
-            st.session_state["authenticated"] = True
-            st.session_state["user"] = c_user
-            st.session_state["name"] = v_users[c_user]["name"]
-            st.session_state["page"] = "Inventory" if c_user == "admin" else "Update Stock"
+    c_user = cookies.get("inv_user")
+    c_time = cookies.get("inv_login_time")
+    if c_user and c_time:
+        try:
+            login_dt = datetime.fromisoformat(c_time)
+            if datetime.now() - login_dt < timedelta(hours=SESSION_HOURS):
+                with open("users.json", "r") as f:
+                    v_users = json.load(f)
+                if c_user in v_users:
+                    st.session_state["authenticated"] = True
+                    st.session_state["user"] = c_user
+                    st.session_state["name"] = v_users[c_user]["name"]
+                    st.session_state["page"] = "Inventory" if c_user == "admin" else "Update Stock"
+                    st.session_state.setdefault("transaction_type", None)
+        except Exception:
+            pass  # Corrupt cookie, just show login
 
 if not st.session_state["authenticated"]:
     st.title("🔒 Staff Login")
@@ -57,8 +95,10 @@ if not st.session_state["authenticated"]:
             with open("users.json", "r") as f:
                 v_users = json.load(f)
             if username in v_users and v_users[username]["password"] == password:
-                # Set 24-hour cookie
-                cookie_manager.set("inv_user", username, expires_at=datetime.now() + timedelta(days=1))
+                # Set persistent cookies (6-hour session)
+                cookies["inv_user"] = username
+                cookies["inv_login_time"] = datetime.now().isoformat()
+                cookies.save()
                 st.session_state["authenticated"] = True
                 st.session_state["user"] = username
                 st.session_state["name"] = v_users[username]["name"]
@@ -71,13 +111,14 @@ if not st.session_state["authenticated"]:
 
 # --- CACHED RESOURCES ---
 PRICE_CACHE = "_price_list_cache.pkl"
+PRICE_LIST_PATH = "priceListHomeFurniture.xlsx"
 
 @st.cache_data
 def load_price_list():
     """Smart loader that handles varied column names (LN Code vs Product Code)."""
     try:
         # 1. Excel File Check
-        xls_path = "priceListHomeFurniture.xlsx"
+        xls_path = PRICE_LIST_PATH
         if not os.path.exists(xls_path): return None
         
         # 2. Cache Check
@@ -139,15 +180,18 @@ if st.sidebar.button("📜 View History", use_container_width=True):
     st.session_state["page"] = "History"
     st.rerun()
 
+if st.sidebar.button("📋 Orders", use_container_width=True):
+    st.session_state["page"] = "Orders"
+    st.session_state["order_mode"] = "list"
+    st.rerun()
+
 if st.session_state.get("user") == "admin":
     if st.sidebar.button("🛠️ Manage Staff", use_container_width=True):
         st.session_state["page"] = "Manage Staff"
         st.rerun()
+if st.session_state.get("user") == "admin":
     if st.sidebar.button("📉 Stock Maintenance", use_container_width=True):
         st.session_state["page"] = "Stock Maintenance"
-        st.rerun()
-    if st.sidebar.button("🛠️ Manage Master List", use_container_width=True):
-        st.session_state["page"] = "Manage Master List"
         st.rerun()
 
 st.sidebar.divider()
@@ -161,30 +205,15 @@ if st.session_state.get("user") == "admin":
         st.rerun()
 
 if st.sidebar.button("Logout", use_container_width=True):
-    cookie_manager.delete("inv_user") # Clear Persistent Login
+    # Safely clear persistent cookies
+    try:
+        cookies["inv_user"] = ""
+        cookies["inv_login_time"] = ""
+        cookies.save()
+    except Exception:
+        pass
     st.session_state["authenticated"] = False
     st.rerun()
-
-if st.session_state.get("user") == "admin":
-    with st.sidebar.expander("🛡️ Data Controls"):
-        if st.button("🧹 Cleanup Rogue Data", help="Scans for 1,000,000+ unit errors", use_container_width=True):
-            if os.path.exists(TXN_FILE):
-                try:
-                    cdf = pd.read_csv(TXN_FILE)
-                    # Check for huge Qty Diff
-                    bad_mask = cdf["Qty Diff"].abs() > 5000 
-                    bad_count = bad_mask.sum()
-                    if bad_count > 0:
-                        cdf = cdf[~bad_mask]
-                        cdf.to_csv(TXN_FILE, index=False)
-                        st.sidebar.success(f"Fixed {bad_count} massive entries!")
-                        st.rerun()
-                    else:
-                        st.sidebar.info("All good! No massive entries found.")
-                except Exception as e:
-                    st.sidebar.error(f"Error: {e}")
-            else:
-                st.sidebar.info("No transaction file found.")
 
 if st.session_state.get("user") == "admin":
     with st.sidebar.expander("🛠️ OCR Diagnostic"):
@@ -237,6 +266,126 @@ def sharpen_image(pil_img):
     # Balanced sharpen: improves 8/3/1/4 accuracy without creating blooming
     kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
     return Image.fromarray(cv2.filter2D(img, -1, kernel))
+
+def render_order_form(order_to_edit=None):
+    """Reusable form for creating and editing orders."""
+    st.subheader("📑 Order Details" if not order_to_edit else "📝 Edit Order")
+    
+    if "cart" not in st.session_state:
+        st.session_state["cart"] = []
+    
+    # Initialize from existing order if editing
+    if order_to_edit and not st.session_state.get("editing_id"):
+        st.session_state["editing_id"] = order_to_edit["order_id"]
+        st.session_state["cart"] = order_to_edit["items"]
+        st.session_state["cust_name"] = order_to_edit["customer_name"]
+        st.session_state["cust_phone"] = order_to_edit["customer_phone"]
+        st.session_state["cust_address"] = order_to_edit["customer_address"]
+    
+    # --- 1. Cart Section ---
+    with st.expander("📦 Add Items to Order", expanded=True):
+        if price_list_df is not None:
+            p_options = [f"{row['LN Code']} | {row['LN Description']}" for _, row in price_list_df.iterrows()]
+            sel_raw = st.selectbox("Search & Select Product", [""] + p_options, key="search_ord")
+            
+            if sel_raw:
+                p_code = sel_raw.split(" | ")[0]
+                p_name = sel_raw.split(" | ")[1]
+                qty = st.number_input("Purchase Quantity", min_value=1, value=1)
+                
+                # Inventory Check
+                current_stock = 0
+                if os.path.exists(EXCEL_FILE):
+                    try:
+                        all_df = pd.concat(pd.read_excel(EXCEL_FILE, sheet_name=None), ignore_index=True)
+                        if "Product Code" in all_df.columns:
+                            match = all_df[all_df["Product Code"].astype(str) == str(p_code)]
+                            if not match.empty:
+                                current_stock = int(match.iloc[0]["Quantity"])
+                    except Exception: pass
+                
+                if qty > current_stock:
+                    st.markdown(f"""
+                        <div style="background-color: #dc2626; color: white; padding: 10px; border-radius: 5px; margin-bottom: 10px;">
+                            <strong>⚠️ Low Stock:</strong> {p_name}<br>
+                            Required: {qty} | InStock: {current_stock} | Short by: {qty - current_stock}
+                        </div>
+                    """, unsafe_allow_html=True)
+                
+                if st.button("➕ Add to Order"):
+                    st.session_state["cart"].append({
+                        "product_code": p_code,
+                        "product_name": p_name,
+                        "quantity": qty
+                    })
+                    st.toast(f"Added {p_name} to cart")
+        
+    # --- 2. Current Cart View ---
+    if st.session_state["cart"]:
+        st.write("**Items in this Order:**")
+        cart_data = []
+        for idx, item in enumerate(st.session_state["cart"]):
+            cart_data.append({
+                "Product": item["product_name"],
+                "Code": item["product_code"],
+                "Qty": item["quantity"]
+            })
+        
+        st.table(cart_data)
+        if st.button("🗑️ Clear Entire Cart"):
+            st.session_state["cart"] = []
+            st.rerun()
+
+    # --- 3. Customer Info ---
+    st.divider()
+    cust_name = st.text_input("Customer Name", value=st.session_state.get("cust_name", ""))
+    cust_phone = st.text_input("Customer Phone", value=st.session_state.get("cust_phone", ""))
+    cust_addr = st.text_area("Delivery Address", value=st.session_state.get("cust_address", ""))
+
+    # --- 4. Submit ---
+    submit_label = "✅ Save Changes" if order_to_edit else "🚀 Create Order"
+    if st.button(submit_label, type="primary"):
+        if not st.session_state["cart"]:
+            st.error("Please add at least one item to the order.")
+        elif not cust_name:
+            st.error("Customer Name is required.")
+        else:
+            orders = load_orders()
+            if order_to_edit:
+                # Update existing
+                for o in orders:
+                    if o["order_id"] == order_to_edit["order_id"]:
+                        o.update({
+                            "customer_name": cust_name,
+                            "customer_phone": cust_phone,
+                            "customer_address": cust_addr,
+                            "items": st.session_state["cart"],
+                            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        })
+                        break
+                st.session_state["order_mode"] = "list"
+            else:
+                # Create new
+                new_id = f"ORD-{len(orders)+1:03d}"
+                orders.append({
+                    "order_id": new_id,
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "created_by": st.session_state["user"],
+                    "customer_name": cust_name,
+                    "customer_phone": cust_phone,
+                    "customer_address": cust_addr,
+                    "items": st.session_state["cart"],
+                    "status": "Pending"
+                })
+            
+            save_orders(orders)
+            # Clear state
+            for key in ["cart", "cust_name", "cust_phone", "cust_address", "editing_id"]:
+                if key in st.session_state: del st.session_state[key]
+            
+            st.success("Order recorded successfully!")
+            st.balloons()
+            st.rerun()
 
 def scan_document(pil_image):
     image = np.array(pil_image)
@@ -461,45 +610,105 @@ if current_page == "Inventory":
 
             st.divider()
             
-            # --- SEARCH & FILTER ---
-            search_query = st.text_input("🔍 Search Inventory", placeholder="Search by Code or Product Name...").lower()
-            cat_filter = st.multiselect("🏷️ Filter by Category", main_df["Category"].unique())
+            # --- SEARCH & NAVIGATION ---
+            search_query = st.text_input("🔍 Global Search", placeholder="Search by Code or Product Name in all categories...").lower()
             
-            # Apply Filters
-            filtered_df = main_df.copy()
-            if search_query:
-                filtered_df = filtered_df[
-                    filtered_df["Product Code"].astype(str).str.lower().str.contains(search_query) |
-                    filtered_df["Product Name"].astype(str).str.lower().str.contains(search_query)
-                ]
-            if cat_filter:
-                filtered_df = filtered_df[filtered_df["Category"].isin(cat_filter)]
+            # Tabs for Categories
+            categories = ["All Inventory"] + sorted(main_df["Category"].unique())
+            tabs = st.tabs(categories)
             
-            # --- BETTER READABILITY STYLING ---
-            def stock_heatmap(row):
-                pc = str(row["Product Code"])
-                t_val = thresholds.get(pc, 0)
-                thresh = t_val.get("min", 0) if isinstance(t_val, dict) else t_val
-                qty = row["Quantity"]
-                
-                # Base styles (Normal)
-                styles = [""] * len(row)
-                qty_idx = list(filtered_df.columns).index("Quantity")
-                
-                if qty == 0:
-                    # Clear Red warning for Out of Stock (Whole Row)
-                    return ["background-color: #fee2e2; color: #991b1b"] * len(row)
-                elif qty < thresh:
-                    # Subtle Orange warning for Low Stock (Only the Quantity cell)
-                    styles[qty_idx] = "background-color: #fef3c7; color: #92400e; font-weight: bold"
-                
-                return styles
+            is_admin = st.session_state.get("user") == "admin"
+            edit_mode = False
+            if is_admin:
+                edit_mode = st.toggle("✏️ Edit Inventory Mode", help="Enable to add, delete, or change products directly")
 
-            if not filtered_df.empty:
-                styled_df = filtered_df.style.apply(stock_heatmap, axis=1)
-                st.dataframe(styled_df, use_container_width=True, hide_index=True)
-            else:
-                st.info("No matching items found.")
+            for i, cat_name in enumerate(categories):
+                with tabs[i]:
+                    if cat_name == "All Inventory":
+                        # GLOBAL VIEW (Searchable but read-only for simplicity)
+                        view_df = main_df.copy()
+                        if search_query:
+                            view_df = view_df[
+                                view_df["Product Code"].astype(str).str.lower().str.contains(search_query) |
+                                view_df["Product Name"].astype(str).str.lower().str.contains(search_query)
+                            ]
+                        
+                        if edit_mode:
+                            st.info("💡 **Tip**: Switch to a specific category tab (e.g., 'Living Room') to Edit, Add, or Delete products.")
+                        
+                        # Apply heatmap styling for View Mode
+                        def stock_heatmap_all(row):
+                            pc = str(row["Product Code"])
+                            t_val = thresholds.get(pc, 0)
+                            thresh = t_val.get("min", 0) if isinstance(t_val, dict) else t_val
+                            qty = row["Quantity"]
+                            styles = [""] * len(row)
+                            try:
+                                qty_idx = list(view_df.columns).index("Quantity")
+                                if qty <= 0: return ["background-color: #fee2e2; color: #991b1b"] * len(row)
+                                elif qty < thresh: styles[qty_idx] = "background-color: #fef3c7; color: #92400e; font-weight: bold"
+                            except: pass
+                            return styles
+
+                        styled_all_df = view_df.style.apply(stock_heatmap_all, axis=1)
+                        st.dataframe(styled_all_df, use_container_width=True, hide_index=True)
+                    else:
+                        # CATEGORY-SPECIFIC VIEW
+                        cat_df = main_df[main_df["Category"] == cat_name].copy()
+                    
+                        if search_query:
+                            cat_df = cat_df[
+                                cat_df["Product Code"].astype(str).str.lower().str.contains(search_query) |
+                                cat_df["Product Name"].astype(str).str.lower().str.contains(search_query)
+                            ]
+                        
+                        if edit_mode:
+                            st.info(f"Editing **{cat_name}** category. You can add new rows at the bottom or delete using the bin icon.")
+                            # Use a unique key for each tab's editor to avoid state collisions
+                            edited_cat_df = st.data_editor(
+                                cat_df, 
+                                use_container_width=True, 
+                                hide_index=True, 
+                                num_rows="dynamic",
+                                key=f"editor_{cat_name}"
+                            )
+                            
+                            if st.button(f"💾 Save Changes to {cat_name}", key=f"save_{cat_name}", type="primary"):
+                                try:
+                                    # 1. Load the original Excel
+                                    with pd.ExcelWriter(EXCEL_FILE, engine="openpyxl", mode="a", if_sheet_exists="replace") as writer:
+                                        # We only want to update THIS specific sheet
+                                        # Since we are in 'replace' mode, we need to preserve OTHER sheets
+                                        # But wait, openpyxl 'replace' mode is cleaner:
+                                        clean_save_df = edited_cat_df.drop(columns=["Category"]) if "Category" in edited_cat_df.columns else edited_cat_df
+                                        clean_save_df.to_excel(writer, sheet_name=cat_name, index=False)
+                                    
+                                    st.success(f"Changes for {cat_name} saved successfully!")
+                                    st.balloons()
+                                    st.rerun()
+                                except Exception as save_err:
+                                    st.error(f"Failed to save {cat_name}: {save_err}")
+                        else:
+                            if not cat_df.empty:
+                                # Apply heatmap styling for View Mode
+                                def stock_heatmap_local(row):
+                                    pc = str(row["Product Code"])
+                                    t_val = thresholds.get(pc, 0)
+                                    thresh = t_val.get("min", 0) if isinstance(t_val, dict) else t_val
+                                    qty = row["Quantity"]
+                                    styles = [""] * len(row)
+                                    try:
+                                        qty_idx = list(cat_df.columns).index("Quantity")
+                                        if qty <= 0: return ["background-color: #fee2e2; color: #991b1b"] * len(row)
+                                        elif qty < thresh: styles[qty_idx] = "background-color: #fef3c7; color: #92400e; font-weight: bold"
+                                    except: pass
+                                    return styles
+
+                                styled_cat_df = cat_df.style.apply(stock_heatmap_local, axis=1)
+                                st.dataframe(styled_cat_df, use_container_width=True, hide_index=True)
+                            else:
+                                st.write("No items in this category matching your search.")
+
 
         except Exception as e:
             st.error(f"Error loading inventory dashboard: {e}")
@@ -631,7 +840,86 @@ elif current_page == "Stock Maintenance" and st.session_state.get("user") == "ad
     else:
         st.info("No custom thresholds set. Alerting on 0 quantity only.")
 
-# 4. MANAGE STAFF PAGE (Admin Only)
+# 4. ORDERS PAGE 
+elif current_page == "Orders":
+    st.title("📋 Order Management")
+    
+    mode = st.session_state.get("order_mode", "list")
+    orders = load_orders()
+    
+    if mode == "list":
+        if st.button("➕ Create New Order", type="primary"):
+            st.session_state["order_mode"] = "create"
+            st.rerun()
+            
+        st.divider()
+        if not orders:
+            st.info("No orders placed yet.")
+        else:
+            for idx, order in enumerate(reversed(orders)):
+                with st.expander(f"📦 {order['order_id']} | {order['customer_name']} | {order['timestamp']}"):
+                    st.write(f"**Created By:** {order['created_by']}")
+                    st.write(f"**Phone:** {order['customer_phone']}")
+                    st.write(f"**Address:** {order['customer_address']}")
+                    st.write("**Order Items Status:**")
+                    
+                    # 1. Load Full Inventory for status check
+                    inv_df = pd.concat(pd.read_excel(EXCEL_FILE, sheet_name=None), ignore_index=True) if os.path.exists(EXCEL_FILE) else pd.DataFrame()
+                    
+                    for item in order["items"]:
+                        p_code = str(item["product_code"])
+                        p_name = item["product_name"]
+                        ord_qty = item["quantity"]
+                        
+                        curr_stock = 0
+                        if not inv_df.empty and "Product Code" in inv_df.columns:
+                            match = inv_df[inv_df["Product Code"].astype(str) == p_code]
+                            if not match.empty:
+                                curr_stock = int(match.iloc[0]["Quantity"])
+                        
+                        if ord_qty > curr_stock:
+                            # RED ALERT for Low Stock
+                            st.markdown(f"""
+                                <div style="background-color: #dc2626; color: white; padding: 10px; border-radius: 5px; margin-bottom: 5px;">
+                                    <strong>⚠️ Low Stock:</strong> {p_name}<br>
+                                    Required: {ord_qty} | InStock: {curr_stock} | Short by: {ord_qty - curr_stock}
+                                </div>
+                            """, unsafe_allow_html=True)
+                        else:
+                            # GREEN ALERT for InStock (Requested: InStock, Ordered qty and instock qty)
+                            st.markdown(f"""
+                                <div style="background-color: #16a34a; color: white; padding: 10px; border-radius: 5px; margin-bottom: 5px;">
+                                    <strong>✅ InStock:</strong> {p_name}<br>
+                                    Ordered: {ord_qty} | Available InStock: {curr_stock}
+                                </div>
+                            """, unsafe_allow_html=True)
+                    
+                    st.divider()
+                    c1, c2 = st.columns(2)
+                    if c1.button("📝 Edit", key=f"edit_{order['order_id']}"):
+                        st.session_state["order_mode"] = "edit"
+                        st.session_state["editing_order"] = order
+                        st.rerun()
+                    if c2.button("🗑️ Remove", key=f"rem_{order['order_id']}", type="secondary"):
+                        orders.remove(order)
+                        save_orders(orders)
+                        st.toast(f"Removed {order['order_id']}")
+                        st.rerun()
+                        
+    elif mode == "create":
+        if st.button("⬅️ Back to List"):
+            st.session_state["order_mode"] = "list"
+            st.rerun()
+        render_order_form()
+        
+    elif mode == "edit":
+        if st.button("⬅️ Back to List"):
+            st.session_state["order_mode"] = "list"
+            if "editing_order" in st.session_state: del st.session_state["editing_order"]
+            st.rerun()
+        render_order_form(order_to_edit=st.session_state.get("editing_order"))
+
+# 5. MANAGE STAFF PAGE (Admin Only)
 elif current_page == "Manage Staff" and st.session_state.get("user") == "admin":
     st.title("🛠️ Manage Staff Accounts")
     
@@ -683,13 +971,23 @@ elif current_page == "Update Stock":
     
     # Step 1: Big Buttons for Selection
     if st.session_state.get("transaction_type") is None:
-        col1, col2 = st.columns(2)
-        if col1.button("➕ INCOMING\n(Add Stock)", type="primary", use_container_width=True):
+        c1, c2, c3 = st.columns(3)
+        if c1.button("➕ INCOMING\n(Add Stock)", type="primary", use_container_width=True):
             st.session_state["transaction_type"] = "Incoming"
             st.rerun()
-        if col2.button("➖ OUTGOING\n(Reduce Stock)", type="primary", use_container_width=True):
+        if c2.button("➖ OUTGOING\n(Reduce Stock)", type="primary", use_container_width=True):
             st.session_state["transaction_type"] = "Outgoing"
             st.rerun()
+        if c3.button("📋 CREATE\nORDER", type="secondary", use_container_width=True):
+            st.session_state["transaction_type"] = "OrderCreation"
+            st.rerun()
+            
+    elif st.session_state.get("transaction_type") == "OrderCreation":
+        if st.button("⬅️ Back"):
+            st.session_state["transaction_type"] = None
+            st.rerun()
+        render_order_form()
+        
     else:
         transaction_type = st.session_state["transaction_type"]
         st.info(f"Mode: **{transaction_type.upper()}** (Tap 'Update Stock' in menu to change)")

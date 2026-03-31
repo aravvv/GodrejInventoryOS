@@ -1,4 +1,3 @@
-extra-streamlit-components
 groq
 openpyxl
 pandas
@@ -9,3 +8,4 @@ streamlit
 streamlit-cookies-manager
 opencv-python-headless
 numpy<2.0.0
+cryptography
