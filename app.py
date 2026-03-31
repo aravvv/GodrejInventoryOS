@@ -255,14 +255,55 @@ if st.session_state.get("user") == "admin":
             st.rerun()
 
 # --- CORE FUNCTIONS ---
+def sanitize_quantity_strict(val):
+    """Strict integer conversion for quantities."""
+    try:
+        # Handles strings like "5.0", " 10 ", etc.
+        qty = int(float(str(val).strip()))
+        return max(0, qty)
+    except (ValueError, TypeError):
+        return 0
+
 def sanitize_quantity(val):
     """Safety guard: no single auto-extraction should exceed 500 units."""
-    try:
-        qty = int(val)
-        if qty > 500: return 1 # Reset to 1 if it smells like a phone number
-        return max(1, qty)
-    except Exception:
-        return 1
+    qty = sanitize_quantity_strict(val)
+    if qty > 500: return 1 # Reset to 1 if it smells like a phone number
+    return max(1, qty)
+
+def validate_package_format(text):
+    """Enforce 'x of y' format where y >= x."""
+    if not text or text == "N/A":
+        return "1 of 1"
+    
+    # Try to find digits separated by 'of', '/', '-', or 'out of'
+    # Example: "1 of 2", "1/2", "1-2", "1 out of 2"
+    match = re.search(r"(\d+)\s*(?:of|out\s*of|/|-)\s*(\d+)", str(text), re.IGNORECASE)
+    if match:
+        x, y = int(match.group(1)), int(match.group(2))
+        if y < x: y = x # Enforce y >= x as requested
+        return f"{x} of {y}"
+    
+    # Fallback: if it's just a single number "2", assume "1 of 2"
+    digits = re.findall(r"\d+", str(text))
+    if digits:
+        val = int(digits[0])
+        if val > 1:
+            return f"1 of {val}"
+    
+    return "1 of 1"
+
+def sanitize_product_code(pc):
+    """Enforce 15-character 8+SD+5 format."""
+    if not pc: return "N/A"
+    clean = str(pc).upper().replace(" ", "").strip()
+    
+    # Standard format: 8 digits + SD + 5 digits
+    # Regex to find these components even if 'SD' is garbled or missing
+    match = re.search(r"(\d{8})[A-Z0-9]{0,2}(\d{5})", clean)
+    if match:
+        return f"{match.group(1)}SD{match.group(2)}"
+    
+    return clean
 
 def hard_extract_math(text):
     """Primary regex for the 15-character 8+SD+5 format."""
@@ -520,14 +561,17 @@ def parse_and_lookup(text):
     """Parse text and verify against Golden Database using Similarity."""
     # 1. Pattern-Based Extraction
     pc, qty = hard_extract_math(text)
+    if pc:
+        pc = sanitize_product_code(pc) # Enforce format
     if not pc:
         pc = repair_ocr_code(text)
+        if pc: pc = sanitize_product_code(pc)
     
     # 2. LLM Extraction (Strict JSON Only)
-    prompt = f"JSON ONLY. Fields: product_code, quantity (int), mrp (num), package. (NO DIMENSIONS). Text: {text}"
+    prompt = f"JSON ONLY. Fields: product_code (8+SD+5), quantity (int), mrp (num), package (format 'x of y'). Text: {text}"
     try:
         res = client.chat.completions.create(
-            messages=[{"role": "system", "content": "Return ONLY JSON with 4 keys: product_code, quantity, mrp, package. Forbidden: dimensions, width, height, length, material."}, {"role": "user", "content": prompt}],
+            messages=[{"role": "system", "content": "Return ONLY JSON with 4 keys: product_code, quantity, mrp, package. For 'package', use 'x of y' format only (e.g. '1 of 2'). Forbidden: dimensions, width, height, length, material."}, {"role": "user", "content": prompt}],
             model="llama-3.1-8b-instant", temperature=0.1, response_format={"type": "json_object"}
         )
         ext_data = json.loads(res.choices[0].message.content)
@@ -540,7 +584,7 @@ def parse_and_lookup(text):
     final_pc = pc if pc else ext_data.get("product_code")
     if not final_pc: return None
     
-    final_pc = str(final_pc).upper().replace(" ", "").strip()
+    final_pc = sanitize_product_code(final_pc)
     st.session_state["raw_ocr_code"] = final_pc # Log for diagnostics
 
     # 3. Golden Database Lookup & Fuzzy Similarity
@@ -588,10 +632,18 @@ def parse_and_lookup(text):
             p_category = str(row.get("Category", p_category))
 
     qty_val = qty if qty is not None else sanitize_quantity(ext_data.get("quantity", 1))
+    package_val = validate_package_format(ext_data.get("package", "N/A"))
+    
+    # Sanitize MRP
+    mrp_val = ext_data.get("mrp")
+    try:
+        if mrp_val: mrp_val = float(mrp_val)
+    except:
+        mrp_val = "N/A"
     
     return {
         "product_code": str(final_pc), "product_name": p_name, "quantity": qty_val,
-        "mrp": ext_data.get("mrp"), "package": ext_data.get("package", "N/A"), "base_price": base_price, "category": p_category
+        "mrp": mrp_val, "package": package_val, "base_price": base_price, "category": p_category
     }
 
 # --- PAGES ---
@@ -698,11 +750,35 @@ if current_page == "Inventory":
                                 use_container_width=True, 
                                 hide_index=True, 
                                 num_rows="dynamic",
+                                column_config={
+                                    "Quantity": st.column_config.NumberColumn(
+                                        "Quantity",
+                                        help="Must be an integer",
+                                        min_value=0,
+                                        step=1,
+                                        format="%d",
+                                    ),
+                                    "Package": st.column_config.TextColumn(
+                                        "Package",
+                                        help="Format: x of y",
+                                    ),
+                                    "Product Code": st.column_config.TextColumn(
+                                        "Product Code",
+                                        help="Format: 8 digits + SD + 5 digits (e.g. 12345678SD12345)",
+                                    )
+                                },
                                 key=f"editor_{cat_name}"
                             )
                             
                             if st.button(f"💾 Save Changes to {cat_name}", key=f"save_{cat_name}", type="primary"):
                                 try:
+                                    # Post-edit sanitization to be 100% sure
+                                    edited_cat_df["Quantity"] = edited_cat_df["Quantity"].apply(sanitize_quantity_strict)
+                                    if "Package" in edited_cat_df.columns:
+                                        edited_cat_df["Package"] = edited_cat_df["Package"].apply(validate_package_format)
+                                    if "Product Code" in edited_cat_df.columns:
+                                        edited_cat_df["Product Code"] = edited_cat_df["Product Code"].apply(sanitize_product_code)
+
                                     # 1. Load the original Excel
                                     with pd.ExcelWriter(EXCEL_FILE, engine="openpyxl", mode="a", if_sheet_exists="replace") as writer:
                                         # We only want to update THIS specific sheet
@@ -1175,11 +1251,27 @@ elif current_page == "Manage Master List":
     df = pd.read_excel(xls, sheet_name=sheet_name, header=5)
     
     st.write(f"📝 **Editing: {sheet_name}**")
-    edited_df = st.data_editor(df, num_rows="dynamic", use_container_width=True, key=f"editor_{sheet_name}")
+    
+    # Identify relevant columns for specific config
+    col_config = {}
+    if "LN Code" in df.columns:
+        col_config["LN Code"] = st.column_config.TextColumn("LN Code", help="Product Code (8+SD+5)")
+    if "Product Code" in df.columns:
+        col_config["Product Code"] = st.column_config.TextColumn("Product Code", help="Product Code (8+SD+5)")
+    if "Unit Consumer Basic" in df.columns:
+        col_config["Unit Consumer Basic"] = st.column_config.NumberColumn("Price", format="₹%d")
+        
+    edited_df = st.data_editor(df, num_rows="dynamic", use_container_width=True, column_config=col_config, key=f"editor_{sheet_name}")
     
     if st.button("💾 Save Changes to Excel", type="primary", use_container_width=True):
         try:
             with st.spinner("Updating master database..."):
+                # Post-edit sanitization for Master List
+                if "LN Code" in edited_df.columns:
+                    edited_df["LN Code"] = edited_df["LN Code"].apply(sanitize_product_code)
+                if "Product Code" in edited_df.columns:
+                    edited_df["Product Code"] = edited_df["Product Code"].apply(sanitize_product_code)
+                
                 from openpyxl import load_workbook
                 
                 # 1. Save data to a temporary in-memory buffer
