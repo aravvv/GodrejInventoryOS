@@ -27,7 +27,8 @@ def get_secret(key, default=None):
 GROQ_API_KEY = get_secret("GROQ_API_KEY")
 OCR_SPACE_API_KEY = get_secret("OCR_SPACE_API_KEY", "helloworld")
 COOKIE_SECRET = get_secret("COOKIE_SECRET", "godrej-inv-secret-key-2024")
-PRICE_LIST_EXCEL = "priceListHomeFurniture.xlsx"
+PRICE_CACHE = "_price_list_cache.pkl"
+DATABASES_DIR = "databases"
 EXCEL_FILE = "inventory.xlsx"
 TXN_FILE = "transactions.csv"
 THRESHOLD_FILE = "thresholds.json"
@@ -123,41 +124,56 @@ if not st.session_state["authenticated"]:
 
 # --- CACHED RESOURCES ---
 PRICE_CACHE = "_price_list_cache.pkl"
-PRICE_LIST_PATH = "priceListHomeFurniture.xlsx"
 
 @st.cache_data
 def load_price_list():
-    """Smart loader that handles varied column names (LN Code vs Product Code)."""
+    """Aggregates all .xlsx price lists from the databases/ folder."""
     try:
-        # 1. Excel File Check
-        xls_path = PRICE_LIST_PATH
-        if not os.path.exists(xls_path): return None
+        if not os.path.exists(DATABASES_DIR):
+            os.makedirs(DATABASES_DIR, exist_ok=True)
+            return None
+            
+        xlsx_files = [f for f in os.listdir(DATABASES_DIR) if f.endswith(".xlsx")]
+        if not xlsx_files: return None
         
-        # 2. Cache Check
+        # 1. Smart Cache Validation (Check if ANY file has changed)
+        latest_mtime = 0
+        for f in xlsx_files:
+            latest_mtime = max(latest_mtime, os.path.getmtime(os.path.join(DATABASES_DIR, f)))
+            
         if os.path.exists(PRICE_CACHE):
-            if os.path.getmtime(PRICE_CACHE) > os.path.getmtime(xls_path):
+            if os.path.getmtime(PRICE_CACHE) > latest_mtime:
                 return pd.read_pickle(PRICE_CACHE)
         
-        # 3. Flexible Column Synonyms
+        # 2. Loading All Files
         CODE_ALIAES = ["LN Code", "Product Code", "Item Code", "Code"]
         DESC_ALIAES = ["LN Description", "Product Name", "Description", "Item Name"]
         
-        xls = pd.ExcelFile(xls_path)
         all_dfs = []
-        for sheet_name in xls.sheet_names:
-            df = pd.read_excel(xls, sheet_name=sheet_name, header=5)
-            
-            # Find Best Columns
-            col_code = next((c for c in CODE_ALIAES if c in df.columns), None)
-            col_desc = next((c for c in DESC_ALIAES if c in df.columns), None)
-            
-            if col_code and col_desc:
-                subset = df[[col_code, col_desc]].copy()
-                # Use standardized internal names
-                subset.columns = ["LN Code", "LN Description"]
-                subset["Unit Consumer Basic"] = df.get("Unit Consumer Basic", pd.Series(dtype="object"))
-                subset["Category"] = sheet_name
-                all_dfs.append(subset)
+        for xfile in xlsx_files:
+            try:
+                xls_path = os.path.join(DATABASES_DIR, xfile)
+                xls = pd.ExcelFile(xls_path)
+                for sheet_name in xls.sheet_names:
+                    # Maintain Row 6 Header (header=5) pattern
+                    df = pd.read_excel(xls, sheet_name=sheet_name, header=5)
+                    
+                    # Find Best Columns
+                    col_code = next((c for c in CODE_ALIAES if c in df.columns), None)
+                    col_desc = next((c for c in DESC_ALIAES if c in df.columns), None)
+                    
+                    if col_code and col_desc:
+                        subset = df[[col_code, col_desc]].copy()
+                        subset.columns = ["LN Code", "LN Description"]
+                        subset["Unit Consumer Basic"] = df.get("Unit Consumer Basic", pd.Series(dtype="object"))
+                        
+                        # Use File Name + Sheet Name for Category unless specified better
+                        subset["Category"] = f"{xfile.replace('.xlsx','')} | {sheet_name}"
+                        subset["Source_File"] = xfile
+                        all_dfs.append(subset)
+            except Exception as fe:
+                st.sidebar.error(f"Error loading {xfile}: {fe}")
+                continue
         
         if all_dfs:
             combined = pd.concat(all_dfs, ignore_index=True)
@@ -167,9 +183,7 @@ def load_price_list():
             return combined
         return None
     except Exception as e:
-        st.session_state["last_ocr_err"] = f"Price List Loading Error: {e}"
-        return None
-        st.sidebar.error(f"Price List Missing or Error: {e}")
+        st.session_state["last_ocr_err"] = f"Price List Aggregation Error: {e}"
         return None
 
 price_list_df = load_price_list()
@@ -204,6 +218,11 @@ if st.session_state.get("user") == "admin":
 if st.session_state.get("user") == "admin":
     if st.sidebar.button("📉 Stock Maintenance", use_container_width=True):
         st.session_state["page"] = "Stock Maintenance"
+        st.rerun()
+
+if st.session_state.get("user") == "admin":
+    if st.sidebar.button("🗂️ Databases", use_container_width=True):
+        st.session_state["page"] = "Databases"
         st.rerun()
 
 st.sidebar.divider()
@@ -1234,76 +1253,120 @@ elif current_page == "Update Stock":
                         for e in errors: st.error(f"⚠️ Skipped {e}")
                     st.balloons()
                     st.success(f"✅ Finished Processing!")
-# 6. MANAGE MASTER LIST (Admin Only)
-elif current_page == "Manage Master List":
-    st.title("🛠️ Manage Master Price List")
-    st.info("Edit your 'Golden Database' here. Changes are saved back to the master Excel file.")
+# 6. DATABASES PAGE (Admin Only)
+elif current_page == "Databases" and st.session_state.get("user") == "admin":
+    st.title("🗂️ Database Management")
+    st.info("Upload and manage your 'Golden Databases' (Price Lists) here. All files will be combined for product lookups.")
     
-    xls_path = "priceListHomeFurniture.xlsx"
-    if not os.path.exists(xls_path):
-        st.error("Master Excel file not found!")
-        st.stop()
+    if not os.path.exists(DATABASES_DIR):
+        os.makedirs(DATABASES_DIR, exist_ok=True)
+    
+    # 1. Upload Section
+    with st.expander("➕ Upload New Database", expanded=False):
+        new_db = st.file_uploader("Upload Price List (.xlsx)", type="xlsx", key="new_db_upload")
+        if new_db:
+            target_path = os.path.join(DATABASES_DIR, new_db.name)
+            with open(target_path, "wb") as f:
+                f.write(new_db.getbuffer())
+            # Clear cache to force aggregation of new file
+            if os.path.exists(PRICE_CACHE): os.remove(PRICE_CACHE)
+            st.cache_data.clear()
+            st.success(f"Successfully added '{new_db.name}' to Databases!")
+            st.balloons()
+            st.rerun()
+
+    # 2. Registry & Management
+    st.divider()
+    xlsx_files = sorted([f for f in os.listdir(DATABASES_DIR) if f.endswith(".xlsx")])
+    
+    if not xlsx_files:
+        st.warning("No database files found. Please upload a price list above.")
+    else:
+        st.subheader("📋 Registered Databases")
         
-    xls = pd.ExcelFile(xls_path)
-    sheet_name = st.selectbox("Select Sheet to Edit", xls.sheet_names)
-    
-    # Read with header=5 to preserve the 6-row offset
-    df = pd.read_excel(xls, sheet_name=sheet_name, header=5)
-    
-    st.write(f"📝 **Editing: {sheet_name}**")
-    
-    # Identify relevant columns for specific config
-    col_config = {}
-    if "LN Code" in df.columns:
-        col_config["LN Code"] = st.column_config.TextColumn("LN Code", help="Product Code (8+SD+5)")
-    if "Product Code" in df.columns:
-        col_config["Product Code"] = st.column_config.TextColumn("Product Code", help="Product Code (8+SD+5)")
-    if "Unit Consumer Basic" in df.columns:
-        col_config["Unit Consumer Basic"] = st.column_config.NumberColumn("Price", format="₹%d")
+        # File selector for viewing/editing
+        sel_edit_file = st.selectbox("Select Database to View/Edit", xlsx_files)
         
-    edited_df = st.data_editor(df, num_rows="dynamic", use_container_width=True, column_config=col_config, key=f"editor_{sheet_name}")
-    
-    if st.button("💾 Save Changes to Excel", type="primary", use_container_width=True):
-        try:
-            with st.spinner("Updating master database..."):
-                # Post-edit sanitization for Master List
-                if "LN Code" in edited_df.columns:
-                    edited_df["LN Code"] = edited_df["LN Code"].apply(sanitize_product_code)
-                if "Product Code" in edited_df.columns:
-                    edited_df["Product Code"] = edited_df["Product Code"].apply(sanitize_product_code)
+        if sel_edit_file:
+            xls_path = os.path.join(DATABASES_DIR, sel_edit_file)
+            
+            # Action Buttons (Delete)
+            c1, c2 = st.columns([4, 1])
+            with c1:
+                st.write(f"📂 File: **{sel_edit_file}**")
+            with c2:
+                if st.button("🗑️ Delete File", type="secondary", use_container_width=True, help="Permanently remove this price list"):
+                    os.remove(xls_path)
+                    if os.path.exists(PRICE_CACHE): os.remove(PRICE_CACHE)
+                    st.cache_data.clear()
+                    st.success(f"Deleted {sel_edit_file}")
+                    st.rerun()
+            
+            st.divider()
+            
+            # Editor Integration
+            try:
+                xls = pd.ExcelFile(xls_path)
+                sheet_name = st.selectbox("Select Sheet to Edit", xls.sheet_names, key=f"sheet_sel_{sel_edit_file}")
                 
-                from openpyxl import load_workbook
+                # Read with header=5 to preserve the 6-row offset
+                df = pd.read_excel(xls, sheet_name=sheet_name, header=5)
                 
-                # 1. Save data to a temporary in-memory buffer
-                buffer = io.BytesIO()
-                with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                    edited_df.to_excel(writer, sheet_name=sheet_name, index=False)
+                st.write(f"📝 **Editing: {sel_edit_file} > {sheet_name}**")
                 
-                # 2. Open original workbook and replace data from Row 7 (index 6, header=5) down
-                wb = load_workbook(xls_path)
-                ws = wb[sheet_name]
+                # Column configurations for better UI
+                col_config = {}
+                if "LN Code" in df.columns:
+                    col_config["LN Code"] = st.column_config.TextColumn("LN Code", help="Product Code (8+SD+5)")
+                if "Product Code" in df.columns:
+                    col_config["Product Code"] = st.column_config.TextColumn("Product Code", help="Product Code (8+SD+5)")
+                if "Unit Consumer Basic" in df.columns:
+                    col_config["Unit Consumer Basic"] = st.column_config.NumberColumn("Price", format="₹%d")
                 
-                # Clear rows from 7 downwards (preserving top 6 rows)
-                for row in ws.iter_rows(min_row=7):
-                    for cell in row: cell.value = None
+                edited_df = st.data_editor(
+                    df, 
+                    num_rows="dynamic", 
+                    use_container_width=True, 
+                    column_config=col_config, 
+                    key=f"editor_{sel_edit_file}_{sheet_name}"
+                )
                 
-                # Write Header and Data
-                # Headers at Row 6 (Excel indexing is 1-based, so Row 6)
-                for c_idx, col in enumerate(edited_df.columns, 1):
-                    ws.cell(row=6, column=c_idx, value=col)
-                
-                # Data starting at Row 7
-                for r_idx, row in enumerate(edited_df.values, 7):
-                    for c_idx, val in enumerate(row, 1):
-                        ws.cell(row=r_idx, column=c_idx, value=val)
-                        
-                wb.save(xls_path)
-                
-                # 3. Clear Cache to force reload
-                if os.path.exists(PRICE_CACHE): os.remove(PRICE_CACHE)
-                st.cache_data.clear()
-                
-                st.success(f"Successfully updated '{sheet_name}' in master Excel file!")
-                st.balloons()
-        except Exception as e:
-            st.error(f"Save Failed: {e}")
+                if st.button("💾 Save Changes to Excel", type="primary", use_container_width=True):
+                    try:
+                        with st.spinner(f"Updating {sel_edit_file}..."):
+                            # Post-edit sanitization
+                            if "LN Code" in edited_df.columns:
+                                edited_df["LN Code"] = edited_df["LN Code"].apply(sanitize_product_code)
+                            if "Product Code" in edited_df.columns:
+                                edited_df["Product Code"] = edited_df["Product Code"].apply(sanitize_product_code)
+                            
+                            from openpyxl import load_workbook
+                            wb = load_workbook(xls_path)
+                            ws = wb[sheet_name]
+                            
+                            # Clear old data from Row 7 downwards (preserving Row 1-6)
+                            for row in ws.iter_rows(min_row=7):
+                                for cell in row: cell.value = None
+                            
+                            # Write Header at Row 6
+                            for c_idx, col in enumerate(edited_df.columns, 1):
+                                ws.cell(row=6, column=c_idx, value=col)
+                            
+                            # Write Data starting at Row 7
+                            for r_idx, row in enumerate(edited_df.values, 7):
+                                for c_idx, val in enumerate(row, 1):
+                                    ws.cell(row=r_idx, column=c_idx, value=val)
+                                    
+                            wb.save(xls_path)
+                            
+                            # Force reload of global search index
+                            if os.path.exists(PRICE_CACHE): os.remove(PRICE_CACHE)
+                            st.cache_data.clear()
+                            
+                            st.success(f"Successfully updated '{sel_edit_file}'!")
+                            st.balloons()
+                            st.rerun()
+                    except Exception as save_err:
+                        st.error(f"Save Failed: {save_err}")
+            except Exception as e:
+                st.error(f"Error loading database editor: {e}")
