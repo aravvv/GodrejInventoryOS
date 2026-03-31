@@ -593,6 +593,38 @@ def scan_document(pil_image):
     
     return Image.fromarray(orig[y1:y2, x1:x2])
 
+def get_orders_with_shortage():
+    """Returns a list of order IDs that have stock shortages among active orders."""
+    if not os.path.exists(ORDERS_FILE) or not os.path.exists(EXCEL_FILE):
+        return []
+        
+    orders = load_orders()
+    # Active: Pending, Processing
+    active_orders = [o for o in orders if o.get("status", "Pending") in ["Pending", "Processing"]]
+    if not active_orders: return []
+    
+    # Quick Inventory Load (Only aggregate quantities)
+    inv_qtys = {}
+    try:
+        xls = pd.ExcelFile(EXCEL_FILE)
+        for sn in xls.sheet_names:
+            if sn.lower() not in ("sheet1", "sheet 1"):
+                sdf = pd.read_excel(xls, sheet_name=sn)
+                for _, row in sdf.iterrows():
+                    pc = str(row.get("Product Code", ""))
+                    if pc: inv_qtys[pc] = inv_qtys.get(pc, 0) + row.get("Quantity", 0)
+    except: return []
+    
+    shortage_ids = []
+    for order in active_orders:
+        for item in order.get("items", []):
+            pc = item.get("product_code")
+            needed = item.get("quantity", 0)
+            if needed > inv_qtys.get(pc, 0):
+                shortage_ids.append(order["order_id"])
+                break
+    return shortage_ids
+
 def compress_image(pil_img, max_size=1280):
     """Resize image to a manageable size for mobile/OCR performance."""
     if max(pil_img.size) > max_size:
@@ -1091,6 +1123,7 @@ elif current_page == "Orders":
     
     mode = st.session_state.get("order_mode", "list")
     orders = load_orders()
+    shortage_ids = get_orders_with_shortage()
     
     if mode == "list":
         if st.button("➕ Create New Order", type="primary"):
@@ -1101,41 +1134,51 @@ elif current_page == "Orders":
         if not orders:
             st.info("No orders placed yet.")
         else:
+            # Load Full Inventory once for detail status checks
+            inv_qtys = {}
+            try:
+                xls_check = pd.ExcelFile(EXCEL_FILE)
+                for sn in xls_check.sheet_names:
+                    if sn.lower() not in ("sheet1", "sheet 1"):
+                        sdf = pd.read_excel(xls_check, sheet_name=sn)
+                        for _, row in sdf.iterrows():
+                            pc = str(row.get("Product Code", ""))
+                            if pc: inv_qtys[pc] = inv_qtys.get(pc, 0) + row.get("Quantity", 0)
+            except: pass
+
             for idx, order in enumerate(reversed(orders)):
-                with st.expander(f"📦 {order['order_id']} | {order['customer_name']} | {order['timestamp']}"):
+                is_short = order['order_id'] in shortage_ids
+                status_label = " ⚠️ SHORT STOCK" if is_short else ""
+                
+                with st.expander(f"📦 {order['order_id']} | {order['customer_name']} | {order['timestamp']}{status_label}"):
+                    if is_short:
+                        st.error(f"🚨 **Attention**: One or more items in this order are currently short of stock.")
+                        
                     st.write(f"**Created By:** {order['created_by']}")
                     st.write(f"**Phone:** {order['customer_phone']}")
                     st.write(f"**Address:** {order['customer_address']}")
                     st.write("**Order Items Status:**")
                     
-                    # 1. Load Full Inventory for status check
-                    inv_df = pd.concat(pd.read_excel(EXCEL_FILE, sheet_name=None), ignore_index=True) if os.path.exists(EXCEL_FILE) else pd.DataFrame()
-                    
                     for item in order["items"]:
                         p_code = str(item["product_code"])
                         p_name = item["product_name"]
                         ord_qty = item["quantity"]
+                        available = inv_qtys.get(p_code, 0)
                         
-                        curr_stock = 0
-                        if not inv_df.empty and "Product Code" in inv_df.columns:
-                            match = inv_df[inv_df["Product Code"].astype(str) == p_code]
-                            if not match.empty:
-                                curr_stock = int(match.iloc[0]["Quantity"])
-                        
-                        if ord_qty > curr_stock:
+                        if ord_qty > available:
                             # RED ALERT for Low Stock
                             st.markdown(f"""
-                                <div style="background-color: #dc2626; color: white; padding: 10px; border-radius: 5px; margin-bottom: 5px;">
-                                    <strong>⚠️ Low Stock:</strong> {p_name}<br>
-                                    Required: {ord_qty} | InStock: {curr_stock} | Short by: {ord_qty - curr_stock}
+                                <div style="background-color: #fee2e2; color: #991b1b; padding: 12px; border-radius: 8px; border: 1px solid #fecaca; margin-bottom: 8px;">
+                                    <strong>⚠️ Stock Shortage:</strong> {p_name} (`{p_code}`)<br>
+                                    Ordered: {ord_qty} units | Currently Available: {available} units | <strong>Short by: {ord_qty - available}</strong>
                                 </div>
                             """, unsafe_allow_html=True)
                         else:
-                            # GREEN ALERT for InStock (Requested: InStock, Ordered qty and instock qty)
+                            # GREEN ALERT for InStock
                             st.markdown(f"""
-                                <div style="background-color: #16a34a; color: white; padding: 10px; border-radius: 5px; margin-bottom: 5px;">
-                                    <strong>✅ InStock:</strong> {p_name}<br>
-                                    Ordered: {ord_qty} | Available InStock: {curr_stock}
+                                <div style="background-color: #f0fdf4; color: #166534; padding: 12px; border-radius: 8px; border: 1px solid #bbf7d0; margin-bottom: 8px;">
+                                    <strong>✅ Stock OK:</strong> {p_name} (`{p_code}`)<br>
+                                    Ordered: {ord_qty} units | Currently Available: {available} units
                                 </div>
                             """, unsafe_allow_html=True)
                     
