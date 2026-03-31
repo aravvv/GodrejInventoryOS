@@ -196,7 +196,13 @@ def load_price_list():
         
         if all_dfs:
             combined = pd.concat(all_dfs, ignore_index=True)
-            combined = combined.dropna(subset=["LN Code"])
+            # 3. Aggressive Data Cleaning: remove NaNs, string "nan", and empty strings
+            combined = combined.dropna(subset=["LN Code", "LN Description"])
+            combined = combined[combined["LN Code"].astype(str).str.lower().str.strip() != "nan"]
+            combined = combined[combined["LN Description"].astype(str).str.lower().str.strip() != "nan"]
+            combined = combined[combined["LN Code"].astype(str).str.strip() != ""]
+            combined = combined[combined["LN Description"].astype(str).str.strip() != ""]
+            
             combined["LN Code"] = combined["LN Code"].astype(str).str.strip()
             combined.to_pickle(PRICE_CACHE)
             return combined

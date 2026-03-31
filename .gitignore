@@ -8,5 +8,10 @@ transactions.csv
 orders.json
 thresholds.json
 users.json
+# Support multiple databases
+!databases/
+!databases/*.xlsx
+
+# Ignore root excel files
 priceListHomeFurniture.xlsx
 _price_list_cache.pkl
