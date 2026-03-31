@@ -155,10 +155,10 @@ def load_price_list():
                     if cached_files == set(xlsx_files):
                         return cached_df
         
-        # 2. Loading All Files (Highly Selective Column Loading)
-        CODE_ALIAES = ["LN Code", "Product Code", "Item Code", "Code"]
-        DESC_ALIAES = ["LN Description", "Product Name", "Description", "Item Name"]
-        PRICE_ALIAES = ["Unit Consumer Basic", "Price", "MRP", "Basic Price"]
+        # 2. Loading All Files (Smart Header Detection & Highly Selective Column Loading)
+        CODE_ALIAES = ["LN Code", "Product Code", "Item Code", "Code", "Itemcode", "LNCode"]
+        DESC_ALIAES = ["LN Description", "Product Name", "Description", "Item Name", "ProductName", "LNDescription"]
+        PRICE_ALIAES = ["Unit Consumer Basic", "Price", "MRP", "Basic Price", "Rate", "BasicRate", "ConsumerPrice"]
         
         all_dfs = []
         for xfile in xlsx_files:
@@ -166,22 +166,43 @@ def load_price_list():
                 xls_path = os.path.join(DATABASES_DIR, xfile)
                 with pd.ExcelFile(xls_path, engine='openpyxl') as xls:
                     for sheet_name in xls.sheet_names:
-                        # PEEK at headers row (Index 5 = Row 6 in Excel)
-                        peek = pd.read_excel(xls, sheet_name=sheet_name, header=5, nrows=0)
-                        cols = peek.columns.tolist()
+                        # --- SMART HEADER FINDER ---
+                        # Scan first 20 rows to find which row is the header
+                        best_header_idx = 0
+                        max_matches = 0
                         
-                        # Identify only the columns we need to save memory
-                        col_code = next((c for c in CODE_ALIAES if c in cols), None)
-                        col_desc = next((c for c in DESC_ALIAES if c in cols), None)
-                        col_price = next((c for c in PRICE_ALIAES if c in cols), None)
+                        # Peek at first 20 rows without assuming a header yet
+                        peek_data = pd.read_excel(xls, sheet_name=sheet_name, nrows=20, header=None)
+                        
+                        for idx, row in peek_data.iterrows():
+                            # Normalize row values for keyword matching
+                            row_vals = [str(v).strip().lower() for v in row.values]
+                            matches = 0
+                            found_code = False
+                            
+                            for val in row_vals:
+                                if any(alias.lower() in val for alias in CODE_ALIAES):
+                                    matches += 2  # Product code column is highly weighted
+                                    found_code = True
+                                if any(alias.lower() in val for alias in DESC_ALIAES):
+                                    matches += 1
+                                if any(alias.lower() in val for alias in PRICE_ALIAES):
+                                    matches += 1
+                                    
+                            if found_code and matches > max_matches:
+                                max_matches = matches
+                                best_header_idx = idx
+                                
+                        # Use identified header to load full sheet
+                        df = pd.read_excel(xls, sheet_name=sheet_name, header=best_header_idx)
+                        cols = df.columns.tolist()
+                        
+                        # Identify the actual columns within the found header
+                        col_code = next((c for c in cols if any(a.lower() in str(c).lower() for a in CODE_ALIAES)), None)
+                        col_desc = next((c for c in cols if any(a.lower() in str(c).lower() for a in DESC_ALIAES)), None)
+                        col_price = next((c for c in cols if any(a.lower() in str(c).lower() for a in PRICE_ALIAES)), None)
                         
                         if col_code and col_desc:
-                            load_cols = [col_code, col_desc]
-                            if col_price: load_cols.append(col_price)
-                            
-                            # READ ONLY THE COLS NEEDED
-                            df = pd.read_excel(xls, sheet_name=sheet_name, header=5, usecols=load_cols)
-                            
                             # Standardize into a lean dataframe
                             subset = pd.DataFrame()
                             subset["LN Code"] = df[col_code].astype(str).str.strip()
