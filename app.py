@@ -205,11 +205,20 @@ def load_price_list():
                         if col_code and col_desc:
                             # Standardize into a lean dataframe
                             subset = pd.DataFrame()
-                            subset["LN Code"] = df[col_code].astype(str).str.strip()
+                            subset["LN Code"] = df[col_code].astype(str).str.strip().str.upper()
                             subset["LN Description"] = df[col_desc].astype(str).str.strip()
                             subset["Unit Consumer Basic"] = df[col_price] if col_price else "N/A"
                             subset["Category"] = f"{xfile.replace('.xlsx','')} | {sheet_name}"
                             subset["Source_File"] = xfile
+                            
+                            # --- DATA CLEANING & VALIDATION ---
+                            # 1. Drop NaNs
+                            subset = subset.dropna(subset=["LN Code", "LN Description"])
+                            # 2. Strict Format Filter: Must be '8 Digits' + 'SD' + '5 Digits' (15 chars)
+                            # Pattern: [0-9]{8}SD[0-9]{5}
+                            is_valid_code = subset["LN Code"].str.match(r"^[0-9]{8}SD[0-9]{5}$", na=False)
+                            subset = subset[is_valid_code]
+                            
                             all_dfs.append(subset)
             except Exception as fe:
                 st.sidebar.error(f"Error loading {xfile}: {fe}")
@@ -217,14 +226,11 @@ def load_price_list():
         
         if all_dfs:
             combined = pd.concat(all_dfs, ignore_index=True)
-            # 3. Aggressive Data Cleaning: remove NaNs, string "nan", and empty strings
+            # Re-verify and clean one last time
             combined = combined.dropna(subset=["LN Code", "LN Description"])
-            combined = combined[combined["LN Code"].astype(str).str.lower().str.strip() != "nan"]
-            combined = combined[combined["LN Description"].astype(str).str.lower().str.strip() != "nan"]
-            combined = combined[combined["LN Code"].astype(str).str.strip() != ""]
-            combined = combined[combined["LN Description"].astype(str).str.strip() != ""]
+            combined = combined[combined["LN Code"].astype(str).str.lower() != "nan"]
+            combined = combined[combined["LN Description"].astype(str).str.lower() != "nan"]
             
-            combined["LN Code"] = combined["LN Code"].astype(str).str.strip()
             combined.to_pickle(PRICE_CACHE)
             return combined
         return None
