@@ -250,6 +250,11 @@ if st.session_state.get("user") == "admin":
         st.session_state["page"] = "Databases"
         st.rerun()
 
+if st.session_state.get("user") == "admin":
+    if st.sidebar.button("📁 File Explorer", use_container_width=True):
+        st.session_state["page"] = "File Explorer"
+        st.rerun()
+
 st.sidebar.divider()
 if st.session_state.get("user") == "admin":
     # ☁️ CLOUD DATA ONBOARDING (Only shows if core files are missing)
@@ -1311,4 +1316,50 @@ elif current_page == "Databases" and st.session_state.get("user") == "admin":
     if st.button("🔄 Force Re-index / Clear Cache", use_container_width=True, help="Use this if you just pushed a new file to GitHub and it hasn't appeared yet."):
         if os.path.exists(PRICE_CACHE): os.remove(PRICE_CACHE)
         st.cache_data.clear()
+        st.rerun()
+
+# 7. FILE EXPLORER PAGE (Admin Only)
+elif current_page == "File Explorer" and st.session_state.get("user") == "admin":
+    st.title("📁 System File Explorer")
+    st.info("Direct view of the Streamlit Cloud environment's disk storage. This lists all files currently present in the app's root and subdirectories.")
+    
+    # 1. Root Directory Scan
+    root_files = []
+    for root, dirs, files in os.walk("."):
+        # Skip certain internal/sensitive folders
+        if any(skip in root for skip in [".git", "__pycache__", ".streamlit", "brain", ".gemini"]):
+            continue
+            
+        for f in files:
+            fpath = os.path.join(root, f)
+            try:
+                stats = os.stat(fpath)
+                root_files.append({
+                    "Path": fpath,
+                    "Size": f"{stats.st_size / 1024:.1f} KB",
+                    "Modified": datetime.fromtimestamp(stats.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+                })
+            except:
+                pass
+                
+    if root_files:
+        df_files = pd.DataFrame(root_files).sort_values("Path")
+        
+        # Categorize by Folder
+        st.subheader("📂 Files on Disk")
+        st.dataframe(df_files, use_container_width=True, hide_index=True)
+        
+        # 2. Specific Quick Look for Critical Files
+        st.divider()
+        st.subheader("🔍 Critical File Status")
+        crit_files = [EXCEL_FILE, TXN_FILE, PRICE_CACHE, THRESHOLD_FILE, ORDERS_FILE, "users.json"]
+        cols = st.columns(len(crit_files))
+        for i, cf in enumerate(crit_files):
+            exists = os.path.exists(cf)
+            cols[i].metric(cf, "✅ OK" if exists else "❌ Missing")
+    else:
+        st.warning("No files indexed.")
+
+    st.divider()
+    if st.button("🔄 Refresh View", use_container_width=True):
         st.rerun()
