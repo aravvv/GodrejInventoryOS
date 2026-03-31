@@ -1274,118 +1274,30 @@ elif current_page == "Update Stock":
                     st.success(f"✅ Finished Processing!")
 # 6. DATABASES PAGE (Admin Only)
 elif current_page == "Databases" and st.session_state.get("user") == "admin":
-    st.title("🗂️ Database Management")
-    st.info("Upload and manage your 'Golden Databases' (Price Lists) here. All files will be combined for product lookups.")
+    st.title("🗂️ Active Databases")
+    st.info("List of 'Golden Databases' currently loaded into the lookup engine. To add or modify files, please push them to the GitHub repository.")
     
-    if not os.path.exists(DATABASES_DIR):
-        os.makedirs(DATABASES_DIR, exist_ok=True)
-    
-    # 1. Upload Section
-    with st.expander("➕ Upload New Database", expanded=False):
-        new_db = st.file_uploader("Upload Price List (.xlsx)", type="xlsx", key="new_db_upload")
-        if new_db:
-            target_path = os.path.join(DATABASES_DIR, new_db.name)
-            with open(target_path, "wb") as f:
-                f.write(new_db.getbuffer())
-            # Clear cache to force aggregation of new file
-            if os.path.exists(PRICE_CACHE): os.remove(PRICE_CACHE)
-            st.cache_data.clear()
-            st.success(f"Successfully added '{new_db.name}' to Databases!")
-            st.balloons()
-            st.rerun()
-
-    # 2. Registry & Management
-    st.divider()
     xlsx_files = sorted([f for f in os.listdir(DATABASES_DIR) if f.endswith(".xlsx")])
     
     if not xlsx_files:
-        st.warning("No database files found. Please upload a price list above.")
+        st.warning("No price list databases found in the system. Use the GitHub repository to add files.")
     else:
-        st.subheader("📋 Registered Databases")
+        # Show Metrics 
+        total_prods = len(price_list_df) if price_list_df is not None else 0
+        st.metric("Total Golden Items Indexed", f"{total_prods:,}")
         
-        # File selector for viewing/editing
-        sel_edit_file = st.selectbox("Select Database to View/Edit", xlsx_files)
-        
-        if sel_edit_file:
-            xls_path = os.path.join(DATABASES_DIR, sel_edit_file)
-            
-            # Action Buttons (Delete)
-            c1, c2 = st.columns([4, 1])
-            with c1:
-                st.write(f"📂 File: **{sel_edit_file}**")
-            with c2:
-                if st.button("🗑️ Delete File", type="secondary", use_container_width=True, help="Permanently remove this price list"):
-                    os.remove(xls_path)
-                    if os.path.exists(PRICE_CACHE): os.remove(PRICE_CACHE)
-                    st.cache_data.clear()
-                    st.success(f"Deleted {sel_edit_file}")
-                    st.rerun()
-            
-            st.divider()
-            
-            # Editor Integration
+        st.divider()
+        st.write("### 📜 Loaded File Registry")
+        for f in xlsx_files:
+            file_path = os.path.join(DATABASES_DIR, f)
             try:
-                xls = pd.ExcelFile(xls_path)
-                sheet_name = st.selectbox("Select Sheet to Edit", xls.sheet_names, key=f"sheet_sel_{sel_edit_file}")
-                
-                # Read with header=5 to preserve the 6-row offset
-                df = pd.read_excel(xls, sheet_name=sheet_name, header=5)
-                
-                st.write(f"📝 **Editing: {sel_edit_file} > {sheet_name}**")
-                
-                # Column configurations for better UI
-                col_config = {}
-                if "LN Code" in df.columns:
-                    col_config["LN Code"] = st.column_config.TextColumn("LN Code", help="Product Code (8+SD+5)")
-                if "Product Code" in df.columns:
-                    col_config["Product Code"] = st.column_config.TextColumn("Product Code", help="Product Code (8+SD+5)")
-                if "Unit Consumer Basic" in df.columns:
-                    col_config["Unit Consumer Basic"] = st.column_config.NumberColumn("Price", format="₹%d")
-                
-                edited_df = st.data_editor(
-                    df, 
-                    num_rows="dynamic", 
-                    use_container_width=True, 
-                    column_config=col_config, 
-                    key=f"editor_{sel_edit_file}_{sheet_name}"
-                )
-                
-                if st.button("💾 Save Changes to Excel", type="primary", use_container_width=True):
-                    try:
-                        with st.spinner(f"Updating {sel_edit_file}..."):
-                            # Post-edit sanitization
-                            if "LN Code" in edited_df.columns:
-                                edited_df["LN Code"] = edited_df["LN Code"].apply(sanitize_product_code)
-                            if "Product Code" in edited_df.columns:
-                                edited_df["Product Code"] = edited_df["Product Code"].apply(sanitize_product_code)
-                            
-                            from openpyxl import load_workbook
-                            wb = load_workbook(xls_path)
-                            ws = wb[sheet_name]
-                            
-                            # Clear old data from Row 7 downwards (preserving Row 1-6)
-                            for row in ws.iter_rows(min_row=7):
-                                for cell in row: cell.value = None
-                            
-                            # Write Header at Row 6
-                            for c_idx, col in enumerate(edited_df.columns, 1):
-                                ws.cell(row=6, column=c_idx, value=col)
-                            
-                            # Write Data starting at Row 7
-                            for r_idx, row in enumerate(edited_df.values, 7):
-                                for c_idx, val in enumerate(row, 1):
-                                    ws.cell(row=r_idx, column=c_idx, value=val)
-                                    
-                            wb.save(xls_path)
-                            
-                            # Force reload of global search index
-                            if os.path.exists(PRICE_CACHE): os.remove(PRICE_CACHE)
-                            st.cache_data.clear()
-                            
-                            st.success(f"Successfully updated '{sel_edit_file}'!")
-                            st.balloons()
-                            st.rerun()
-                    except Exception as save_err:
-                        st.error(f"Save Failed: {save_err}")
-            except Exception as e:
-                st.error(f"Error loading database editor: {e}")
+                size_kb = os.path.getsize(file_path) / 1024
+                st.markdown(f"📦 **{f}**  \n`Size: {size_kb:.1f} KB` | `Status: Indexed` ")
+            except:
+                st.markdown(f"📦 **{f}** (Status: Error reading file info)")
+
+    st.divider()
+    if st.button("🔄 Force Re-index / Clear Cache", use_container_width=True, help="Use this if you just pushed a new file to GitHub and it hasn't appeared yet."):
+        if os.path.exists(PRICE_CACHE): os.remove(PRICE_CACHE)
+        st.cache_data.clear()
+        st.rerun()
