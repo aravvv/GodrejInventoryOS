@@ -158,7 +158,7 @@ def load_price_list():
         # 2. Loading All Files (Smart Header Detection & Highly Selective Column Loading)
         CODE_ALIAES = ["LN Code", "Product Code", "Item Code", "Code", "Itemcode", "LNCode"]
         DESC_ALIAES = ["LN Description", "Product Name", "Description", "Item Name", "ProductName", "LNDescription"]
-        BASE_PRICE_ALIAES = ["Unit Consumer Basic", "Base Price", "Basic Price", "Rate", "BasicRate", "Basic"]
+        BASE_PRICE_ALIAES = ["Unit Consumer Basic", "Unit Basic Price", "Base Price", "Basic Price", "Rate", "BasicRate", "Basic"]
         MRP_ALIAES = ["MRP", "Maximum Retail Price", "Consumer Price", "Retail Price", "ConsumerPrice", "MRP Price"]
         
         all_dfs = []
