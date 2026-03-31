@@ -125,7 +125,16 @@ if not st.session_state["authenticated"]:
 # --- CACHED RESOURCES ---
 PRICE_CACHE = "_price_list_cache.pkl"
 
-@st.cache_data
+def clean_price(val):
+    """Ensure price is a float and truncate to 2 decimal places."""
+    try:
+        fval = float(str(val).replace(",", "").strip())
+        # Use floor/truncation logic for 2 decimals as requested
+        return float(f"{int(fval * 100) / 100.0:.2f}")
+    except:
+        return 0.0
+
+@st.cache_data(show_spinner="📄 Aggregating price lists...")
 def load_price_list():
     """Aggregates all .xlsx price lists from the databases/ folder with memory efficiency."""
     try:
@@ -386,14 +395,6 @@ def validate_package_format(text):
     
     return "1 of 1"
 
-def clean_price(val):
-    """Ensure price is a float and truncate to 2 decimal places."""
-    try:
-        fval = float(str(val).replace(",", "").strip())
-        # Use floor/truncation logic for 2 decimals as requested
-        return float(f"{int(fval * 100) / 100.0:.2f}")
-    except:
-        return 0.0
 
 def sanitize_product_code(pc):
     """Enforce 15-character 8+SD+5 format."""
@@ -1214,7 +1215,6 @@ elif current_page == "Update Stock":
             
             if st.button("🔍 Extract & Process All", type="primary", use_container_width=True):
                 # Phase 1: Scan files
-                st.subheader("📋 Scanning Files...")
                 status_container = st.container()
                 extracted_items = []
                 
