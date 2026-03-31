@@ -158,7 +158,7 @@ def load_price_list():
         # 2. Loading All Files (Smart Header Detection & Highly Selective Column Loading)
         CODE_ALIAES = ["LN Code", "Product Code", "Item Code", "Code", "Itemcode", "LNCode"]
         DESC_ALIAES = ["LN Description", "Product Name", "Description", "Item Name", "ProductName", "LNDescription"]
-        PRICE_ALIAES = ["Unit Consumer Basic", "Price", "MRP", "Basic Price", "Rate", "BasicRate", "ConsumerPrice"]
+        PRICE_ALIAES = ["Unit Consumer Basic", "Price", "Base Price", "MRP", "Basic Price", "Rate", "BasicRate", "ConsumerPrice", "BasePrice"]
         
         all_dfs = []
         for xfile in xlsx_files:
