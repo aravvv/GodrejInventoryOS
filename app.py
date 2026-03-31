@@ -198,12 +198,28 @@ def load_price_list():
                         cols = df.columns.tolist()
                         
                         # Identify the actual columns within the found header
-                        col_code = next((c for c in cols if any(a.lower() in str(c).lower() for a in CODE_ALIAES)), None)
-                        col_desc = next((c for c in cols if any(a.lower() in str(c).lower() for a in DESC_ALIAES)), None)
-                        col_price = next((c for c in cols if any(a.lower() in str(c).lower() for a in PRICE_ALIAES)), None)
+                        # Priority: Exact match -> Case-insensitive exact match -> Contains match
+                        def find_best_col(options, aliases, blacklist=None):
+                            options_clean = [str(c).strip().lower() for c in options]
+                            # 1. Exact case-insensitive match
+                            for a in aliases:
+                                if a.lower() in options_clean:
+                                    return options[options_clean.index(a.lower())]
+                            # 2. Contains match (with blacklist protection)
+                            for c_idx, c_orig in enumerate(options):
+                                c_low = str(c_orig).lower()
+                                if blacklist and any(b.lower() in c_low for b in blacklist):
+                                    continue
+                                if any(a.lower() in c_low for a in aliases):
+                                    return c_orig
+                            return None
+
+                        col_code = find_best_col(cols, CODE_ALIAES, blacklist=["HSN", "Tax", "Total", "Unit", "MRP"])
+                        col_desc = find_best_col(cols, DESC_ALIAES, blacklist=["Code"])
+                        col_price = find_best_col(cols, PRICE_ALIAES, blacklist=["Tax", "GST"])
                         
                         if col_code and col_desc:
-                            # Standardize into a lean dataframe
+                             # Standardize into a lean dataframe
                             subset = pd.DataFrame()
                             subset["LN Code"] = df[col_code].astype(str).str.strip().str.upper()
                             subset["LN Description"] = df[col_desc].astype(str).str.strip()
