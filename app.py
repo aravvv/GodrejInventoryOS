@@ -214,9 +214,9 @@ def load_price_list():
                             # --- DATA CLEANING & VALIDATION ---
                             # 1. Drop NaNs
                             subset = subset.dropna(subset=["LN Code", "LN Description"])
-                            # 2. Strict Format Filter: Must be '8 Digits' + 'SD' + '5 Digits' (15 chars)
-                            # Pattern: [0-9]{8}SD[0-9]{5}
-                            is_valid_code = subset["LN Code"].str.match(r"^[0-9]{8}SD[0-9]{5}$", na=False)
+                            # 2. Flexible Format Filter: 'Numbers' + 'Letters' + 'Numbers' (e.g. 123SD456)
+                            # This catches 8SD5, 6SF3, and other common inventory formats.
+                            is_valid_code = subset["LN Code"].str.match(r"^[0-9]+[A-Z]{1,4}[0-9]+$", na=False)
                             subset = subset[is_valid_code]
                             
                             all_dfs.append(subset)
@@ -226,10 +226,10 @@ def load_price_list():
         
         if all_dfs:
             combined = pd.concat(all_dfs, ignore_index=True)
-            # Re-verify and clean one last time
+            # Total unique items across all databases
+            combined = combined.drop_duplicates(subset=["LN Code"])
             combined = combined.dropna(subset=["LN Code", "LN Description"])
             combined = combined[combined["LN Code"].astype(str).str.lower() != "nan"]
-            combined = combined[combined["LN Description"].astype(str).str.lower() != "nan"]
             
             combined.to_pickle(PRICE_CACHE)
             return combined
