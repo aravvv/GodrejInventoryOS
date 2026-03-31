@@ -262,6 +262,38 @@ def load_price_list():
 
 price_list_df = load_price_list()
 
+def get_orders_with_shortage():
+    """Returns a list of order IDs that have stock shortages among active orders."""
+    if not os.path.exists(ORDERS_FILE) or not os.path.exists(EXCEL_FILE):
+        return []
+        
+    orders = load_orders()
+    # Active: Pending, Processing
+    active_orders = [o for o in orders if o.get("status", "Pending") in ["Pending", "Processing"]]
+    if not active_orders: return []
+    
+    # Quick Inventory Load (Only aggregate quantities)
+    inv_qtys = {}
+    try:
+        xls = pd.ExcelFile(EXCEL_FILE)
+        for sn in xls.sheet_names:
+            if sn.lower() not in ("sheet1", "sheet 1"):
+                sdf = pd.read_excel(xls, sheet_name=sn)
+                for _, row in sdf.iterrows():
+                    pc = str(row.get("Product Code", ""))
+                    if pc: inv_qtys[pc] = inv_qtys.get(pc, 0) + row.get("Quantity", 0)
+    except: return []
+    
+    shortage_ids = []
+    for order in active_orders:
+        for item in order.get("items", []):
+            pc = item.get("product_code")
+            needed = item.get("quantity", 0)
+            if needed > inv_qtys.get(pc, 0):
+                shortage_ids.append(order["order_id"])
+                break
+    return shortage_ids
+
 # --- SIDEBAR UI ---
 st.sidebar.title(f"👤 Welcome, {st.session_state.get('name', 'Staff')}")
 st.sidebar.divider()
@@ -280,7 +312,15 @@ if st.sidebar.button("📜 View History", use_container_width=True):
     st.session_state["page"] = "History"
     st.rerun()
 
-if st.sidebar.button("📋 Orders", use_container_width=True):
+shortage_ids = []
+try:
+    shortage_ids = get_orders_with_shortage()
+except: pass
+
+# WhatsApp style badge: Show Count with Red Alert if > 0
+btn_label = f"📋 Orders ({len(shortage_ids)}) 🔴" if len(shortage_ids) > 0 else "📋 Orders"
+        
+if st.sidebar.button(btn_label, use_container_width=True):
     st.session_state["page"] = "Orders"
     st.session_state["order_mode"] = "list"
     st.rerun()
@@ -593,37 +633,6 @@ def scan_document(pil_image):
     
     return Image.fromarray(orig[y1:y2, x1:x2])
 
-def get_orders_with_shortage():
-    """Returns a list of order IDs that have stock shortages among active orders."""
-    if not os.path.exists(ORDERS_FILE) or not os.path.exists(EXCEL_FILE):
-        return []
-        
-    orders = load_orders()
-    # Active: Pending, Processing
-    active_orders = [o for o in orders if o.get("status", "Pending") in ["Pending", "Processing"]]
-    if not active_orders: return []
-    
-    # Quick Inventory Load (Only aggregate quantities)
-    inv_qtys = {}
-    try:
-        xls = pd.ExcelFile(EXCEL_FILE)
-        for sn in xls.sheet_names:
-            if sn.lower() not in ("sheet1", "sheet 1"):
-                sdf = pd.read_excel(xls, sheet_name=sn)
-                for _, row in sdf.iterrows():
-                    pc = str(row.get("Product Code", ""))
-                    if pc: inv_qtys[pc] = inv_qtys.get(pc, 0) + row.get("Quantity", 0)
-    except: return []
-    
-    shortage_ids = []
-    for order in active_orders:
-        for item in order.get("items", []):
-            pc = item.get("product_code")
-            needed = item.get("quantity", 0)
-            if needed > inv_qtys.get(pc, 0):
-                shortage_ids.append(order["order_id"])
-                break
-    return shortage_ids
 
 def compress_image(pil_img, max_size=1280):
     """Resize image to a manageable size for mobile/OCR performance."""
