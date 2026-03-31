@@ -127,11 +127,16 @@ PRICE_CACHE = "_price_list_cache.pkl"
 
 @st.cache_data
 def load_price_list():
-    """Aggregates all .xlsx price lists from the databases/ folder."""
+    """Aggregates all .xlsx price lists from the databases/ folder with memory efficiency."""
     try:
         if not os.path.exists(DATABASES_DIR):
             os.makedirs(DATABASES_DIR, exist_ok=True)
-            return None
+            # Migration check: auto-move old file if it still exists in root
+            old_path = "priceListHomeFurniture.xlsx"
+            if os.path.exists(old_path):
+                os.rename(old_path, os.path.join(DATABASES_DIR, old_path))
+            else:
+                return None
             
         xlsx_files = [f for f in os.listdir(DATABASES_DIR) if f.endswith(".xlsx")]
         if not xlsx_files: return None
@@ -145,32 +150,41 @@ def load_price_list():
             if os.path.getmtime(PRICE_CACHE) > latest_mtime:
                 return pd.read_pickle(PRICE_CACHE)
         
-        # 2. Loading All Files
+        # 2. Loading All Files (Highly Selective Column Loading)
         CODE_ALIAES = ["LN Code", "Product Code", "Item Code", "Code"]
         DESC_ALIAES = ["LN Description", "Product Name", "Description", "Item Name"]
+        PRICE_ALIAES = ["Unit Consumer Basic", "Price", "MRP", "Basic Price"]
         
         all_dfs = []
         for xfile in xlsx_files:
             try:
                 xls_path = os.path.join(DATABASES_DIR, xfile)
-                xls = pd.ExcelFile(xls_path)
-                for sheet_name in xls.sheet_names:
-                    # Maintain Row 6 Header (header=5) pattern
-                    df = pd.read_excel(xls, sheet_name=sheet_name, header=5)
-                    
-                    # Find Best Columns
-                    col_code = next((c for c in CODE_ALIAES if c in df.columns), None)
-                    col_desc = next((c for c in DESC_ALIAES if c in df.columns), None)
-                    
-                    if col_code and col_desc:
-                        subset = df[[col_code, col_desc]].copy()
-                        subset.columns = ["LN Code", "LN Description"]
-                        subset["Unit Consumer Basic"] = df.get("Unit Consumer Basic", pd.Series(dtype="object"))
+                with pd.ExcelFile(xls_path, engine='openpyxl') as xls:
+                    for sheet_name in xls.sheet_names:
+                        # PEEK at headers row (Index 5 = Row 6 in Excel)
+                        peek = pd.read_excel(xls, sheet_name=sheet_name, header=5, nrows=0)
+                        cols = peek.columns.tolist()
                         
-                        # Use File Name + Sheet Name for Category unless specified better
-                        subset["Category"] = f"{xfile.replace('.xlsx','')} | {sheet_name}"
-                        subset["Source_File"] = xfile
-                        all_dfs.append(subset)
+                        # Identify only the columns we need to save memory
+                        col_code = next((c for c in CODE_ALIAES if c in cols), None)
+                        col_desc = next((c for c in DESC_ALIAES if c in cols), None)
+                        col_price = next((c for c in PRICE_ALIAES if c in cols), None)
+                        
+                        if col_code and col_desc:
+                            load_cols = [col_code, col_desc]
+                            if col_price: load_cols.append(col_price)
+                            
+                            # READ ONLY THE COLS NEEDED
+                            df = pd.read_excel(xls, sheet_name=sheet_name, header=5, usecols=load_cols)
+                            
+                            # Standardize into a lean dataframe
+                            subset = pd.DataFrame()
+                            subset["LN Code"] = df[col_code].astype(str).str.strip()
+                            subset["LN Description"] = df[col_desc].astype(str).str.strip()
+                            subset["Unit Consumer Basic"] = df[col_price] if col_price else "N/A"
+                            subset["Category"] = f"{xfile.replace('.xlsx','')} | {sheet_name}"
+                            subset["Source_File"] = xfile
+                            all_dfs.append(subset)
             except Exception as fe:
                 st.sidebar.error(f"Error loading {xfile}: {fe}")
                 continue
