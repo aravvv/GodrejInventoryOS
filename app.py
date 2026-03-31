@@ -141,14 +141,19 @@ def load_price_list():
         xlsx_files = [f for f in os.listdir(DATABASES_DIR) if f.endswith(".xlsx")]
         if not xlsx_files: return None
         
-        # 1. Smart Cache Validation (Check if ANY file has changed)
+        # 1. Smart Cache Validation (Check if file list OR timestamps changed)
         latest_mtime = 0
         for f in xlsx_files:
             latest_mtime = max(latest_mtime, os.path.getmtime(os.path.join(DATABASES_DIR, f)))
             
         if os.path.exists(PRICE_CACHE):
             if os.path.getmtime(PRICE_CACHE) > latest_mtime:
-                return pd.read_pickle(PRICE_CACHE)
+                cached_df = pd.read_pickle(PRICE_CACHE)
+                # CRITICAL: Verify that the cached files match the folder's current files exactly
+                if "Source_File" in cached_df.columns:
+                    cached_files = set(cached_df["Source_File"].unique())
+                    if cached_files == set(xlsx_files):
+                        return cached_df
         
         # 2. Loading All Files (Highly Selective Column Loading)
         CODE_ALIAES = ["LN Code", "Product Code", "Item Code", "Code"]
