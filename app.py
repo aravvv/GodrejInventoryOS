@@ -210,8 +210,8 @@ def load_price_list():
                             subset = pd.DataFrame()
                             subset["LN Code"] = df[col_code].astype(str).str.strip().str.upper()
                             subset["LN Description"] = df[col_desc].astype(str).str.strip()
-                            subset["Unit Consumer Basic"] = df[col_base] if col_base else "N/A"
-                            subset["MRP"] = df[col_mrp] if col_mrp else (df[col_base] if col_base else "N/A")
+                            subset["Unit Consumer Basic"] = df[col_base].apply(clean_price) if col_base else 0.0
+                            subset["MRP"] = df[col_mrp].apply(clean_price) if col_mrp else (df[col_base].apply(clean_price) if col_base else 0.0)
                             subset["Category"] = f"{xfile.replace('.xlsx','')} | {sheet_name}"
                             subset["Source_File"] = xfile
                             
@@ -385,6 +385,15 @@ def validate_package_format(text):
             return f"1 of {val}"
     
     return "1 of 1"
+
+def clean_price(val):
+    """Ensure price is a float and truncate to 2 decimal places."""
+    try:
+        fval = float(str(val).replace(",", "").strip())
+        # Use floor/truncation logic for 2 decimals as requested
+        return float(f"{int(fval * 100) / 100.0:.2f}")
+    except:
+        return 0.0
 
 def sanitize_product_code(pc):
     """Enforce 15-character 8+SD+5 format."""
@@ -734,11 +743,8 @@ def parse_and_lookup(text):
     if db_mrp != "N/A":
         mrp_val = db_mrp
         
-    try:
-        if mrp_val and mrp_val != "N/A": 
-            mrp_val = float(mrp_val)
-    except:
-        mrp_val = base_price if base_price != "N/A" else "N/A"
+    mrp_val = clean_price(mrp_val)
+    base_price = clean_price(base_price)
     
     return {
         "product_code": str(final_pc), "product_name": p_name, "quantity": qty_val,
