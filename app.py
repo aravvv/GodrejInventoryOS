@@ -227,20 +227,25 @@ if st.session_state.get("user") == "admin":
 
 st.sidebar.divider()
 if st.session_state.get("user") == "admin":
-    # ☁️ CLOUD DATA ONBOARDING (Only shows if files are missing)
-    if not os.path.exists(EXCEL_FILE) or not os.path.exists(PRICE_LIST_PATH):
+    # ☁️ CLOUD DATA ONBOARDING (Only shows if core files are missing)
+    is_db_empty = not os.path.exists(DATABASES_DIR) or not any(f.endswith(".xlsx") for f in os.listdir(DATABASES_DIR))
+    if not os.path.exists(EXCEL_FILE) or is_db_empty:
         with st.sidebar.expander("📂 Initial Data Setup", expanded=True):
-            st.info("Your Cloud environment is empty. Please upload your master files.")
-            up_inv = st.file_uploader("Upload inventory.xlsx", type="xlsx", key="setup_inv")
-            if up_inv:
-                with open(EXCEL_FILE, "wb") as f: f.write(up_inv.getbuffer())
-                st.success("Main Inventory Uploaded!"); st.rerun()
-            up_price = st.file_uploader("Upload priceListHomeFurniture.xlsx", type="xlsx", key="setup_price")
-            if up_price:
-                with open(PRICE_LIST_PATH, "wb") as f: f.write(up_price.getbuffer())
-                if os.path.exists(PRICE_CACHE): os.remove(PRICE_CACHE)
-                st.cache_data.clear()
-                st.success("Price List Uploaded!"); st.rerun()
+            st.info("Setup your environment. Use the 'Databases' menu to upload price lists.")
+            
+            # Inventory File Setup
+            if not os.path.exists(EXCEL_FILE):
+                up_inv = st.file_uploader("Upload inventory.xlsx", type="xlsx", key="setup_inv")
+                if up_inv:
+                    with open(EXCEL_FILE, "wb") as f: f.write(up_inv.getbuffer())
+                    st.success("Inventory File Created!"); st.rerun()
+            
+            # Databases Prompt
+            if is_db_empty:
+                st.warning("⚠️ No Price Lists found. Go to 'Databases' to upload your golden databases.")
+                if st.button("Go to Databases"):
+                    st.session_state["page"] = "Databases"
+                    st.rerun()
         st.sidebar.divider()
 
     if st.sidebar.button("🗑️ Clear Inventory", type="secondary"):
