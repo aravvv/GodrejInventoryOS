@@ -158,7 +158,8 @@ def load_price_list():
         # 2. Loading All Files (Smart Header Detection & Highly Selective Column Loading)
         CODE_ALIAES = ["LN Code", "Product Code", "Item Code", "Code", "Itemcode", "LNCode"]
         DESC_ALIAES = ["LN Description", "Product Name", "Description", "Item Name", "ProductName", "LNDescription"]
-        PRICE_ALIAES = ["Unit Consumer Basic", "Price", "Base Price", "MRP", "Basic Price", "Rate", "BasicRate", "ConsumerPrice", "BasePrice"]
+        BASE_PRICE_ALIAES = ["Unit Consumer Basic", "Base Price", "Basic Price", "Rate", "BasicRate", "Basic"]
+        MRP_ALIAES = ["MRP", "Maximum Retail Price", "Consumer Price", "Retail Price", "ConsumerPrice", "MRP Price"]
         
         all_dfs = []
         for xfile in xlsx_files:
@@ -167,67 +168,60 @@ def load_price_list():
                 with pd.ExcelFile(xls_path, engine='openpyxl') as xls:
                     for sheet_name in xls.sheet_names:
                         # --- SMART HEADER FINDER ---
-                        # Scan first 20 rows to find which row is the header
                         best_header_idx = 0
                         max_matches = 0
-                        
-                        # Peek at first 20 rows without assuming a header yet
                         peek_data = pd.read_excel(xls, sheet_name=sheet_name, nrows=20, header=None)
                         
                         for idx, row in peek_data.iterrows():
-                            # Normalize row values for keyword matching
                             row_vals = [str(v).strip().lower() for v in row.values]
                             matches = 0
                             found_code = False
-                            
                             for val in row_vals:
                                 if any(alias.lower() in val for alias in CODE_ALIAES):
-                                    matches += 2  # Product code column is highly weighted
+                                    matches += 2
                                     found_code = True
-                                if any(alias.lower() in val for alias in DESC_ALIAES):
-                                    matches += 1
-                                if any(alias.lower() in val for alias in PRICE_ALIAES):
-                                    matches += 1
+                                if any(alias.lower() in val for alias in DESC_ALIAES): matches += 1
+                                if any(alias.lower() in val for alias in BASE_PRICE_ALIAES): matches += 1
                                     
                             if found_code and matches > max_matches:
                                 max_matches = matches
                                 best_header_idx = idx
                                 
-                        # Use identified header to load full sheet
                         df = pd.read_excel(xls, sheet_name=sheet_name, header=best_header_idx)
                         cols = df.columns.tolist()
                         
-                        # Identify the actual columns within the found header
-                        # Priority: Exact match -> Case-insensitive exact match -> Contains match
                         def find_best_col(options, aliases, blacklist=None):
                             options_clean = [str(c).strip().lower() for c in options]
-                            # 1. Exact case-insensitive match
                             for a in aliases:
                                 if a.lower() in options_clean:
                                     return options[options_clean.index(a.lower())]
-                            # 2. Contains match (with blacklist protection)
                             for c_idx, c_orig in enumerate(options):
                                 c_low = str(c_orig).lower()
-                                if blacklist and any(b.lower() in c_low for b in blacklist):
-                                    continue
-                                if any(a.lower() in c_low for a in aliases):
-                                    return c_orig
+                                if blacklist and any(b.lower() in c_low for b in blacklist): continue
+                                if any(a.lower() in c_low for a in aliases): return c_orig
                             return None
 
                         col_code = find_best_col(cols, CODE_ALIAES, blacklist=["HSN", "Tax", "Total", "Unit", "MRP"])
                         col_desc = find_best_col(cols, DESC_ALIAES, blacklist=["Code"])
-                        col_price = find_best_col(cols, PRICE_ALIAES, blacklist=["Tax", "GST"])
+                        col_base = find_best_col(cols, BASE_PRICE_ALIAES, blacklist=["MRP", "Tax"])
+                        col_mrp = find_best_col(cols, MRP_ALIAES, blacklist=["Base", "Basic"])
                         
                         if col_code and col_desc:
-                             # Standardize into a lean dataframe
                             subset = pd.DataFrame()
                             subset["LN Code"] = df[col_code].astype(str).str.strip().str.upper()
                             subset["LN Description"] = df[col_desc].astype(str).str.strip()
-                            subset["Unit Consumer Basic"] = df[col_price] if col_price else "N/A"
+                            subset["Unit Consumer Basic"] = df[col_base] if col_base else "N/A"
+                            subset["MRP"] = df[col_mrp] if col_mrp else (df[col_base] if col_base else "N/A")
                             subset["Category"] = f"{xfile.replace('.xlsx','')} | {sheet_name}"
                             subset["Source_File"] = xfile
                             
                             # --- DATA CLEANING & VALIDATION ---
+                            subset = subset.dropna(subset=["LN Code", "LN Description"])
+                            is_alphanumeric = subset["LN Code"].str.match(r"^[A-Z0-9-]+$", na=False, case=False)
+                            has_letters = subset["LN Code"].str.contains(r"[A-Z]", na=False, case=False)
+                            has_numbers = subset["LN Code"].str.contains(r"[0-9]", na=False)
+                            subset = subset[is_alphanumeric & has_letters & has_numbers]
+                            all_dfs.append(subset)
                             # 1. Drop NaNs
                             subset = subset.dropna(subset=["LN Code", "LN Description"])
                             # 2. Hybrid Filter: Must contain both Letters and Numbers
@@ -730,16 +724,21 @@ def parse_and_lookup(text):
             p_name = str(row.get("LN Description", p_name))
             base_price = str(row.get("Unit Consumer Basic", base_price))
             p_category = str(row.get("Category", p_category))
+            db_mrp = row.get("MRP", "N/A")
 
     qty_val = qty if qty is not None else sanitize_quantity(ext_data.get("quantity", 1))
     package_val = validate_package_format(ext_data.get("package", "N/A"))
     
-    # Sanitize MRP
+    # Priority for MRP: Database -> AI Extracted -> Base Price fallback
     mrp_val = ext_data.get("mrp")
+    if db_mrp != "N/A":
+        mrp_val = db_mrp
+        
     try:
-        if mrp_val: mrp_val = float(mrp_val)
+        if mrp_val and mrp_val != "N/A": 
+            mrp_val = float(mrp_val)
     except:
-        mrp_val = "N/A"
+        mrp_val = base_price if base_price != "N/A" else "N/A"
     
     return {
         "product_code": str(final_pc), "product_name": p_name, "quantity": qty_val,
