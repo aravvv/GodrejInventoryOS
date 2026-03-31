@@ -214,10 +214,13 @@ def load_price_list():
                             # --- DATA CLEANING & VALIDATION ---
                             # 1. Drop NaNs
                             subset = subset.dropna(subset=["LN Code", "LN Description"])
-                            # 2. Flexible Format Filter: 'Numbers' + 'Letters' + 'Numbers' (e.g. 123SD456)
-                            # This catches 8SD5, 6SF3, and other common inventory formats.
-                            is_valid_code = subset["LN Code"].str.match(r"^[0-9]+[A-Z]{1,4}[0-9]+$", na=False)
-                            subset = subset[is_valid_code]
+                            # 2. Hybrid Filter: Must contain both Letters and Numbers
+                            # This is the most robust way to find "Codes" while ignoring junk text.
+                            is_alphanumeric = subset["LN Code"].str.match(r"^[A-Z0-9-]+$", na=False, case=False)
+                            has_letters = subset["LN Code"].str.contains(r"[A-Z]", na=False, case=False)
+                            has_numbers = subset["LN Code"].str.contains(r"[0-9]", na=False)
+                            
+                            subset = subset[is_alphanumeric & has_letters & has_numbers]
                             
                             all_dfs.append(subset)
             except Exception as fe:
