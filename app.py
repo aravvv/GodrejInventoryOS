@@ -212,6 +212,28 @@ if st.session_state.get("user") == "admin":
     if st.sidebar.button("📉 Stock Maintenance", use_container_width=True):
         st.session_state["page"] = "Stock Maintenance"
         st.rerun()
+    
+    with st.sidebar.expander("📂 Initial Data Setup", expanded=False):
+        st.info("Upload your local files to populate the live site.")
+        
+        # 1. Inventory Upload
+        up_inv = st.file_uploader("Upload inventory.xlsx", type="xlsx", key="up_inv")
+        if up_inv:
+            with open(EXCEL_FILE, "wb") as f:
+                f.write(up_inv.getbuffer())
+            st.success("Inventory uploaded!")
+            st.rerun()
+            
+        # 2. Price List Upload
+        up_price = st.file_uploader("Upload priceListHomeFurniture.xlsx", type="xlsx", key="up_price")
+        if up_price:
+            with open(PRICE_LIST_PATH, "wb") as f:
+                f.write(up_price.getbuffer())
+            # Clear cache for the new price list
+            if os.path.exists(PRICE_CACHE): os.remove(PRICE_CACHE)
+            st.cache_data.clear()
+            st.success("Price list uploaded!")
+            st.rerun()
 
 st.sidebar.divider()
 if st.session_state.get("user") == "admin":
