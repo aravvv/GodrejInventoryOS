@@ -820,24 +820,59 @@ if current_page == "Inventory":
                             ]
                         
                         if edit_mode:
-                            st.info("💡 **Tip**: Switch to a specific category tab (e.g., 'Living Room') to Edit, Add, or Delete products.")
-                        
-                        # Apply heatmap styling for View Mode
-                        def stock_heatmap_all(row):
-                            pc = str(row["Product Code"])
-                            t_val = thresholds.get(pc, 0)
-                            thresh = t_val.get("min", 0) if isinstance(t_val, dict) else t_val
-                            qty = row["Quantity"]
-                            styles = [""] * len(row)
-                            try:
-                                qty_idx = list(view_df.columns).index("Quantity")
-                                if qty <= 0: return ["background-color: #fee2e2; color: #991b1b"] * len(row)
-                                elif qty < thresh: styles[qty_idx] = "background-color: #fef3c7; color: #92400e; font-weight: bold"
-                            except: pass
-                            return styles
+                            st.info("✏️ **Global Edit Mode**: Changes made here will be synced back to their respective sheets in the Excel file (e.g., Living Room, Bedroom, etc.).")
+                            edited_all_df = st.data_editor(
+                                view_df, 
+                                use_container_width=True, 
+                                hide_index=True, 
+                                num_rows="dynamic",
+                                key="global_editor"
+                            )
+                            
+                            if st.button("💾 Save All Changes Globally", type="primary", use_container_width=True):
+                                with st.spinner("Syncing global changes to all sheets..."):
+                                    # 1. Group edited data by Category
+                                    all_sheets = {}
+                                    
+                                    # Handle each row based on its Category column
+                                    for cat, group in edited_all_df.groupby("Category"):
+                                        sn = str(cat).strip() if pd.notna(cat) else "Uncategorized"
+                                        # Remove metadata column if it exists in individual sheet view
+                                        sheet_data = group.drop(columns=["Category"]) if "Category" in group.columns else group
+                                        all_sheets[sn] = sheet_data
+                                    
+                                    # 2. Add any completely missing sheets if they were in the original but not the editor
+                                    original_sheets = main_df["Category"].unique()
+                                    for osn in original_sheets:
+                                        if osn not in all_sheets:
+                                            all_sheets[osn] = main_df[main_df["Category"] == osn].drop(columns=["Category"])
 
-                        styled_all_df = view_df.style.apply(stock_heatmap_all, axis=1)
-                        st.dataframe(styled_all_df, use_container_width=True, hide_index=True)
+                                    # 3. Save to Excel
+                                    try:
+                                        with pd.ExcelWriter(EXCEL_FILE, engine='openpyxl') as writer:
+                                            for sn, sdf in all_sheets.items():
+                                                sdf.to_excel(writer, sheet_name=sn, index=False)
+                                        st.success("Global Inventory Synced!")
+                                        st.rerun()
+                                    except Exception as e:
+                                        st.error(f"Save failed: {e}")
+                        else:
+                            # Apply heatmap styling for View Mode
+                            def stock_heatmap_all(row):
+                                pc = str(row["Product Code"])
+                                t_val = thresholds.get(pc, 0)
+                                thresh = t_val.get("min", 0) if isinstance(t_val, dict) else t_val
+                                qty = row["Quantity"]
+                                styles = [""] * len(row)
+                                try:
+                                    qty_idx = list(view_df.columns).index("Quantity")
+                                    if qty <= 0: return ["background-color: #fee2e2; color: #991b1b"] * len(row)
+                                    elif qty < thresh: styles[qty_idx] = "background-color: #fef3c7; color: #92400e; font-weight: bold"
+                                except: pass
+                                return styles
+
+                            styled_all_df = view_df.style.apply(stock_heatmap_all, axis=1)
+                            st.dataframe(styled_all_df, use_container_width=True, hide_index=True)
                     else:
                         # CATEGORY-SPECIFIC VIEW
                         cat_df = main_df[main_df["Category"] == cat_name].copy()
